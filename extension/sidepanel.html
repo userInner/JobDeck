@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>JobDeck 求职执行器</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>REAL CHROME RUNNER</small></div></div>
+      <button id="pause" class="pause" type="button">暂停</button>
+    </header>
+    <main>
+      <section class="route" aria-label="操作链路">
+        <div><i class="dot web"></i><span>Web 规划</span></div><b>→</b>
+        <div><i class="dot review"></i><span>你确认</span></div><b>→</b>
+        <div><i id="chromeDot" class="dot chrome"></i><span>Chrome 执行</span></div>
+      </section>
+
+      <section id="setup" class="setup hidden">
+        <p class="eyebrow">FIRST CONNECTION</p>
+        <h1>连接本机求职工作台</h1>
+        <p>先启动 JobDeck 本地应用，然后连接。扩展使用你当前的 Chrome 登录态，不会读取个人资料目录。</p>
+        <button id="pair" class="primary wide" type="button">连接本机 JobDeck</button>
+        <button id="manualPair" class="link" type="button">手动设置地址</button>
+      </section>
+
+      <section id="workspace" class="hidden">
+        <section class="site-card">
+          <div><small>当前站点</small><strong id="site">—</strong></div>
+          <button id="siteToggle" type="button">允许此站点</button>
+        </section>
+        <section id="bossTools" class="boss-tools hidden">
+          <div><p class="eyebrow">BOSS ZHIPIN ADAPTER</p><strong id="bossPageType">已启用专用解析</strong><small id="bossContext">等待读取当前页面</small></div>
+          <button id="draftBossReply" class="hidden" type="button">起草当前回复</button>
+          <p id="bossNote"></p>
+        </section>
+        <section class="quick-grid">
+          <button id="capture" class="quick primary" type="button"><span>＋</span>捕获当前岗位</button>
+          <button id="inspect" class="quick" type="button"><span>◎</span>读取当前页面</button>
+          <button id="discover" class="quick wide-quick" type="button"><span>⌕</span>扫描当前搜索结果中的岗位</button>
+        </section>
+        <section class="block">
+          <div class="block-head"><div><p class="eyebrow">APPROVAL QUEUE</p><h2>待你确认</h2></div><span id="count">0</span></div>
+          <div id="queue" class="queue"></div>
+        </section>
+        <section class="block page-block">
+          <div class="block-head"><div><p class="eyebrow">LIVE PAGE</p><h2>最近读取的页面</h2></div></div>
+          <div id="page" class="page"></div>
+        </section>
+        <section class="block log-block">
+          <div class="block-head"><div><p class="eyebrow">LOCAL LOG</p><h2>最近操作</h2></div></div>
+          <div id="history" class="history"></div>
+        </section>
+      </section>
+    </main>
+    <footer><span id="connection">检查连接中</span><button id="openWeb" class="link" type="button">打开工作台</button><button id="settings" class="link" type="button">设置</button></footer>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

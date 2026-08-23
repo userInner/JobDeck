@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.log
+*.zip
+.env
+.env.*
+!.env.example
+assets/*.pdf
+.jobdeck-local/
+data/*.json
+!data/sample-state.json

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>JobDeck · 本地 AI 求职驾驶舱</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>LOCAL JOB DESK</small></div></div>
+        <nav aria-label="主导航">
+          <button class="nav-item active" data-view="dashboard" type="button"><span>⌂</span>工作台</button>
+          <button class="nav-item" data-view="assistant" type="button"><span>✦</span>AI 助手</button>
+          <button class="nav-item" data-view="jobs" type="button"><span>▤</span>岗位池</button>
+          <button class="nav-item" data-view="resume" type="button"><span>▧</span>简历</button>
+          <button class="nav-item" data-view="settings" type="button"><span>⌁</span>设置</button>
+        </nav>
+        <div class="sidebar-foot">
+          <span id="privacyDot" class="status-dot"></span>
+          <p><strong>数据留在本机</strong><small id="dataStatus">正在连接服务</small></p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="masthead">
+          <div><p class="kicker">JOB SEARCH OPERATIONS</p><h1 id="pageTitle">今天先做对的岗位</h1></div>
+          <div class="system-state">
+            <span id="modelState" class="state-pill off">模型未配置</span>
+            <span id="chromeState" class="state-pill off">Chrome 未连接</span>
+            <button id="pauseAll" class="pause-button" type="button">暂停操作</button>
+          </div>
+        </header>
+
+        <section id="view-dashboard" class="view active">
+          <section class="workflow-card" aria-labelledby="workflowTitle">
+            <div class="workflow-copy">
+              <p class="eyebrow">FIRST RUN · BOSS ZHIPIN</p>
+              <h2 id="workflowTitle">从在线简历开始，而不是盲投</h2>
+              <p id="workflowStatus">首次运行会自动打开并审查 BOSS 在线简历，完成后再进入职位搜索。</p>
+              <div id="workflowActions" class="button-row workflow-main-actions"></div>
+              <p id="workflowHint" class="workflow-hint">JobDeck 会使用当前 Chrome 登录状态并自动读取简历；只有首次站点授权、登录失效或模型认证失败时才需要你处理。</p>
+            </div>
+            <ol class="workflow-steps" aria-label="首次求职流程">
+              <li data-workflow-step="resume"><span>01</span><div><strong>在线简历</strong><small>读取与审查</small></div></li>
+              <li data-workflow-step="search"><span>02</span><div><strong>职位搜索</strong><small>按目标筛选</small></div></li>
+              <li data-workflow-step="detail"><span>03</span><div><strong>完整 JD</strong><small>判断技术匹配</small></div></li>
+              <li data-workflow-step="apply"><span>04</span><div><strong>匹配即投</strong><small>定制招呼并验证</small></div></li>
+            </ol>
+            <div id="workflowResults" class="workflow-results"></div>
+          </section>
+
+          <section class="brief-strip">
+            <div><small>目标方向</small><strong id="targetRoles">—</strong></div>
+            <div><small>地点</small><strong id="targetLocations">—</strong></div>
+            <div><small>薪资底线</small><strong id="salaryTarget">—</strong></div>
+            <button class="plain-link" data-go="settings" type="button">调整目标</button>
+          </section>
+
+          <section class="pipeline" aria-label="求职漏斗">
+            <article><span>01</span><small>已捕获</small><strong id="countCaptured">0</strong></article>
+            <i>→</i>
+            <article><span>02</span><small>推荐岗位</small><strong id="countRecommended">0</strong></article>
+            <i>→</i>
+            <article><span>03</span><small>已沟通</small><strong id="countSent">0</strong></article>
+            <i>→</i>
+            <article><span>04</span><small>有回复</small><strong id="countReplied">0</strong></article>
+            <i>→</i>
+            <article><span>05</span><small>面试</small><strong id="countInterview">0</strong></article>
+          </section>
+
+          <div class="dashboard-grid">
+            <section class="panel action-panel">
+              <div class="panel-head"><div><p class="eyebrow">CURRENT CHROME PAGE</p><h2>从正在看的岗位开始</h2></div><span id="activePageLabel" class="muted">尚未读取</span></div>
+              <div class="action-stage">
+                <p>在 Chrome 打开一条职位详情，JobDeck 会读取页面、保存 JD、检查重复，再交给 AI 做匹配分析。</p>
+                <div class="button-row">
+                  <button id="captureJob" class="primary" type="button">捕获当前岗位</button>
+                  <button id="discoverJobs" type="button">扫描当前岗位列表</button>
+                  <button id="readPage" type="button">只读取页面</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel approval-panel">
+              <div class="panel-head"><div><p class="eyebrow">HUMAN APPROVAL</p><h2>等待你确认</h2></div><span id="pendingBadge" class="count-badge">0</span></div>
+              <div id="dashboardQueue" class="compact-list"></div>
+            </section>
+
+            <section class="panel jobs-panel">
+              <div class="panel-head"><div><p class="eyebrow">TOP MATCHES</p><h2>优先处理</h2></div><button class="plain-link" data-go="jobs" type="button">查看全部</button></div>
+              <div id="topJobs" class="job-list"></div>
+            </section>
+
+            <section class="panel activity-panel">
+              <div class="panel-head"><div><p class="eyebrow">LOCAL ACTIVITY</p><h2>最近动态</h2></div></div>
+              <div id="recentActivity" class="activity-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-assistant" class="view assistant-view">
+          <div class="assistant-layout">
+            <aside class="mode-panel">
+              <p class="eyebrow">CONVERSATION MODE</p>
+              <button class="mode active" data-mode="general" type="button"><strong>求职策略</strong><small>定位、计划与下一步</small></button>
+              <button class="mode" data-mode="matching" type="button"><strong>岗位分析</strong><small>匹配度与硬性缺口</small></button>
+              <button class="mode" data-mode="resume" type="button"><strong>简历优化</strong><small>重写与关键词调整</small></button>
+              <button class="mode" data-mode="reply" type="button"><strong>招聘沟通</strong><small>招呼语与消息草稿</small></button>
+              <div class="truth-note"><strong>事实边界已启用</strong><p>正式经历、独立项目和开源贡献会分开描述；薪资、面试时间和重大承诺只生成草稿。</p></div>
+            </aside>
+            <section class="chat-panel">
+              <div id="messages" class="messages"><div class="welcome-message"><span>AI</span><div><strong>把最终目标告诉求职 Agent</strong><p>例如：“在北京和深圳找到并定制沟通 30 个适合我的 AI 岗位”。Agent 会观察真实页面、动态规划、调用 Chrome 与求职工具、验证结果，再决定下一步；不会被固定流程或步骤数限制。</p></div></div></div>
+              <form id="chatForm" class="composer">
+                <textarea id="chatInput" rows="3" placeholder="描述问题或最终目标，例如：帮我在北京和深圳完成30个匹配岗位的定制沟通" required></textarea>
+                <div><span id="chatModeLabel">求职策略</span><button class="primary" type="submit">发送 / 执行</button></div>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-jobs" class="view">
+          <div class="section-toolbar">
+            <div><p class="eyebrow">JOB PIPELINE</p><h2>岗位池</h2></div>
+            <div class="toolbar-actions"><select id="jobFilter"><option value="all">全部状态</option><option value="captured">待分析</option><option value="analyzed">已分析</option><option value="sent">已沟通</option><option value="skipped">已跳过</option></select><button id="captureJobSecondary" class="primary" type="button">捕获当前岗位</button></div>
+          </div>
+          <div id="allJobs" class="all-jobs"></div>
+        </section>
+
+        <section id="view-resume" class="view">
+          <div class="resume-layout">
+            <section class="panel resume-editor">
+              <div class="panel-head"><div><p class="eyebrow">SOURCE OF TRUTH</p><h2>候选人资料与简历</h2></div><button id="saveResume" class="primary" type="button">保存资料</button></div>
+              <div class="form-grid">
+                <label><span>求职状态</span><input id="candidateStatus" /></label>
+                <label><span>GitHub</span><input id="candidateGithub" /></label>
+                <label class="full"><span>简历文件路径</span><input id="resumePath" /></label>
+                <label class="full"><span>简历正文</span><textarea id="resumeText" rows="18" placeholder="粘贴纯文本简历，AI 优化时会优先参考这里。"></textarea></label>
+              </div>
+            </section>
+            <aside class="panel fact-panel">
+              <div class="panel-head"><div><p class="eyebrow">VERIFIED FACTS</p><h2>可直接使用的事实</h2></div></div>
+              <div id="facts" class="fact-list"></div>
+              <p class="fact-help">AI 只基于这些事实和简历正文进行表达，不会补写不存在的经历。</p>
+            </aside>
+          </div>
+        </section>
+
+        <section id="view-automation" class="view">
+          <section class="panel task-composer">
+            <div class="panel-head"><div><p class="eyebrow">PAGE TASK</p><h2>告诉 AI 当前页面要做什么</h2></div><span class="muted">只生成操作，执行前逐条确认</span></div>
+            <form id="browserTaskForm" class="task-form">
+              <textarea id="browserTask" rows="3" placeholder="例如：把上面生成的招呼语填写到聊天输入框；或找到简历中的项目经历编辑入口。"></textarea>
+              <button class="primary" type="submit">读取页面并生成计划</button>
+            </form>
+            <p id="browserPlanSummary" class="plan-summary"></p>
+          </section>
+          <div class="automation-grid">
+            <section class="panel">
+              <div class="panel-head"><div><p class="eyebrow">ACTION QUEUE</p><h2>浏览器操作队列</h2></div><span id="automationCount" class="count-badge">0</span></div>
+              <div id="automationQueue" class="action-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><p class="eyebrow">RECENT RESULTS</p><h2>执行记录</h2></div></div>
+              <div id="actionHistory" class="history-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-settings" class="view">
+          <div class="settings-grid">
+            <section class="panel settings-panel">
+              <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span class="muted">密钥仅保存在本机</span></div>
+              <form id="providerForm" class="settings-form">
+                <label><span>接口模式</span><select id="providerMode"><option value="openai-responses">OpenAI Responses</option><option value="compatible-chat">OpenAI-compatible Chat</option></select></label>
+                <label><span>模型名称</span><input id="providerModel" placeholder="gpt-5.4" required /></label>
+                <label class="full"><span>Base URL</span><input id="providerBaseURL" type="url" required /></label>
+                <label class="full"><span>API Key</span><input id="providerKey" type="password" autocomplete="off" placeholder="已配置时可留空" /></label>
+                <div class="full"><button class="primary" type="submit">保存模型设置</button></div>
+              </form>
+            </section>
+            <section class="panel settings-panel">
+              <div class="panel-head"><div><p class="eyebrow">SEARCH BRIEF</p><h2>求职目标</h2></div></div>
+              <form id="targetForm" class="settings-form">
+                <label class="full"><span>目标岗位（每行一个）</span><textarea id="settingsRoles" rows="5"></textarea></label>
+                <label class="full"><span>目标地点（每行一个）</span><textarea id="settingsLocations" rows="3"></textarea></label>
+                <label><span>月薪底线 K</span><input id="salaryFloor" type="number" min="0" /></label>
+                <label><span>薪资上限目标 K</span><input id="salaryUpper" type="number" min="0" /></label>
+                <div class="full"><button class="primary" type="submit">保存求职目标</button></div>
+              </form>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

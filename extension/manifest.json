@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "JobDeck 求职执行器",
+  "version": "0.15.2",
+  "minimum_chrome_version": "116",
+  "description": "把本地 AI 求职工作台与当前 Chrome 登录会话连接起来。",
+  "permissions": ["tabs", "scripting", "storage", "alarms", "sidePanel", "debugger"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "打开 JobDeck"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html"
+}
