@@ -4,6 +4,8 @@ JobDeck 是一个 local-first 的 AI 求职 Agent。它把本地 Web 工作台�
 
 项目当前重点适配 BOSS 直聘，同时保留通用浏览器工具接口，便于继续增加其他招聘网站与求职动作。
 
+![JobDeck 工作台](docs/images/dashboard.jpg)
+
 ## 能做什么
 
 - 读取并审查在线简历，生成字段级优化稿。
@@ -18,6 +20,8 @@ JobDeck 不读取 Chrome 的 Cookie 数据库，也不创建独立的自动化�
 ## Agent 工作方式
 
 Agent 运行时维护一个动态工具注册表。模型每轮只能选择一个工具，读取真实结果后再决定下一步：
+
+![JobDeck 求职 Agent](docs/images/agent.jpg)
 
 ```text
 用户目标
@@ -125,3 +129,7 @@ scripts/     启动与冒烟测试
 ## 当前状态
 
 JobDeck 仍处于早期开发阶段。招聘网站 DOM 和交互会频繁变化，提交 Issue 时请提供页面类型、可复现步骤、扩展版本和脱敏截图，不要上传简历、聊天记录、API Key 或其他个人信息。
+
+## License
+
+[MIT](LICENSE)

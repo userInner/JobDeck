@@ -243,9 +243,11 @@ function countStatus(...statuses) {
 }
 
 function renderDashboard() {
-  $("#targetRoles").textContent = state.candidate.targetRoles.join(" · ");
-  $("#targetLocations").textContent = state.candidate.locations.join(" · ");
-  $("#salaryTarget").textContent = `${state.candidate.salaryFloorK}K+ / 上限 ${state.candidate.salaryUpperTargetK}K+`;
+  $("#targetRoles").textContent = state.candidate.targetRoles.join(" · ") || "尚未设置";
+  $("#targetLocations").textContent = state.candidate.locations.join(" · ") || "尚未设置";
+  $("#salaryTarget").textContent = Number(state.candidate.salaryFloorK) > 0 || Number(state.candidate.salaryUpperTargetK) > 0
+    ? `${state.candidate.salaryFloorK || "未设"}K+ / 上限 ${state.candidate.salaryUpperTargetK || "未设"}K+`
+    : "尚未设置";
   $("#countCaptured").textContent = state.jobs.length;
   $("#countRecommended").textContent = state.jobs.filter((job) => Number(job.score) >= 70).length;
   $("#countSent").textContent = countStatus("sent", "replied", "interview");
