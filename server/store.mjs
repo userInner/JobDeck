@@ -84,6 +84,7 @@ export class Store {
         mode: input.mode || state.provider.mode,
         baseURL: input.baseURL || state.provider.baseURL,
         model: input.model || state.provider.model,
+        source: input.source || state.provider.source || "manual",
         configured: Boolean(input.apiKey || this.secrets.apiKey)
       };
     });
@@ -92,6 +93,15 @@ export class Store {
       this.saveSecrets();
     }
     return this.state.provider;
+  }
+
+  setManagedProvider(input) {
+    const provider = this.setProvider(input);
+    this.secrets.providerSource = input.source;
+    this.secrets.providerAccountId = String(input.accountId || "");
+    this.secrets.providerAPIKeyId = String(input.apiKeyId || "");
+    this.saveSecrets();
+    return provider;
   }
 
   addActivity(label, status = "done", meta = {}) {

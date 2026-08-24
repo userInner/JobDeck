@@ -34,3 +34,34 @@ test("Sub2API reward call stays server-side and is idempotent", async () => {
     code: "reward-42", type: "balance", value: 5, user_id: 42, notes: "verified"
   });
 });
+
+test("Sub2API client reuses the current user's active JobDeck key", async () => {
+  const calls = [];
+  const client = new Sub2APIClient({
+    baseURL: "https://accounts.example.com",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return Response.json({ code: 0, data: { items: [{ id: 7, name: "JobDeck", status: "active", key: "sk-user-key" }] } });
+    }
+  });
+  const key = await client.ensureAPIKey("user-access", { accountId: 42 });
+  assert.equal(key.key, "sk-user-key");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.headers.Authorization, "Bearer user-access");
+});
+
+test("Sub2API client creates a dedicated key when the user has none", async () => {
+  const calls = [];
+  const client = new Sub2APIClient({
+    baseURL: "https://accounts.example.com",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (options.method === "POST") return Response.json({ code: 0, data: { id: 9, name: "JobDeck", status: "active", key: "sk-created" } });
+      return Response.json({ code: 0, data: { items: [] } });
+    }
+  });
+  const key = await client.ensureAPIKey("user-access", { accountId: 42 });
+  assert.equal(key.key, "sk-created");
+  assert.equal(calls[1].options.headers["Idempotency-Key"], "jobdeck-api-key-42");
+  assert.deepEqual(JSON.parse(calls[1].options.body), { name: "JobDeck" });
+});

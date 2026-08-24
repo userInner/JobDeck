@@ -90,6 +90,32 @@ test("tenant initializer runs for restored and newly created accounts", async ()
   }
 });
 
+test("multi-user runtime automatically connects each account to its own Sub2API key", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-tenants-"));
+  const calls = [];
+  const accounts = fakeAccounts();
+  accounts.gatewayBaseURL = "https://accounts.example.com/v1";
+  accounts.ensureAPIKey = async (token, options) => {
+    calls.push({ token, options });
+    return { id: options.accountId, key: `sk-${options.accountId}` };
+  };
+  try {
+    const manager = new TenantRuntimeManager({ directory, sub2api: accounts, multiUser: true });
+    const alice = await manager.fromAccessToken("token-alice");
+    const bob = await manager.fromAccessToken("token-bob");
+    assert.equal(alice.store.secrets.apiKey, "sk-101");
+    assert.equal(bob.store.secrets.apiKey, "sk-202");
+    assert.equal(alice.store.state.provider.baseURL, "https://accounts.example.com/v1");
+    assert.equal(alice.store.state.provider.model, "gpt-5.6-luna");
+    assert.equal(alice.store.state.provider.source, "sub2api");
+    await manager.fromAccessToken("token-alice");
+    assert.equal(calls.filter((call) => call.options.accountId === "101").length, 1);
+    manager.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("multi-user middleware binds bearer and extension requests to the correct tenant", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-tenants-"));
   try {

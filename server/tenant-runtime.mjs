@@ -46,6 +46,8 @@ export class TenantRuntimeManager {
     this.tenants = new Map();
     this.deviceTokens = new Map();
     this.profileCache = new Map();
+    this.providerReady = new Set();
+    this.providerProvisioning = new Map();
     this.agentFactory = null;
     this.tenantInitializer = null;
     this.local = this.createTenant("local", { local: true });
@@ -117,13 +119,43 @@ export class TenantRuntimeManager {
   async fromAccessToken(token) {
     const digest = tokenDigest(token);
     const cached = this.profileCache.get(digest);
-    if (cached && cached.expiresAt > Date.now()) return cached.tenant;
+    if (cached && cached.expiresAt > Date.now()) {
+      await this.ensureProvider(cached.tenant, token);
+      return cached.tenant;
+    }
     const profile = await this.sub2api.profile(token);
     const id = accountId(profile);
     if (!id) throw new Error("账号信息缺少用户编号");
     const tenant = this.getOrCreate(id, profile);
+    await this.ensureProvider(tenant, token);
     this.profileCache.set(digest, { tenant, expiresAt: cacheDeadline(token, this.profileCacheMs) });
     return tenant;
+  }
+
+  async ensureProvider(tenant, token) {
+    if (!this.multiUser || !this.sub2api?.ensureAPIKey || this.providerReady.has(tenant.id)) return tenant;
+    const pending = this.providerProvisioning.get(tenant.id);
+    if (pending) return pending;
+    const provisioning = (async () => {
+      const key = await this.sub2api.ensureAPIKey(token, { name: "JobDeck", accountId: tenant.id });
+      tenant.store.setManagedProvider({
+        mode: "openai-responses",
+        baseURL: this.sub2api.gatewayBaseURL,
+        model: process.env.JOBDECK_SUB2API_MODEL || "gpt-5.6-luna",
+        apiKey: key.key,
+        source: "sub2api",
+        accountId: tenant.id,
+        apiKeyId: key.id
+      });
+      this.providerReady.add(tenant.id);
+      return tenant;
+    })();
+    this.providerProvisioning.set(tenant.id, provisioning);
+    try {
+      return await provisioning;
+    } finally {
+      this.providerProvisioning.delete(tenant.id);
+    }
   }
 
   invalidateAccessToken(token) {

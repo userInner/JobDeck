@@ -221,12 +221,12 @@
               </div>
             </section>
             <section class="panel settings-panel">
-              <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span class="muted">密钥仅保存在你的 JobDeck 服务</span></div>
+              <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span id="providerStorageHint" class="muted">密钥仅保存在你的 JobDeck 服务</span></div>
               <form id="providerForm" class="settings-form">
                 <label><span>接口模式</span><select id="providerMode"><option value="openai-responses">OpenAI Responses</option><option value="compatible-chat">OpenAI-compatible Chat</option></select></label>
                 <label><span>模型名称</span><input id="providerModel" placeholder="gpt-5.4" required /></label>
                 <label class="full"><span>Base URL</span><input id="providerBaseURL" type="url" required /></label>
-                <label class="full"><span>API Key</span><input id="providerKey" type="password" autocomplete="off" placeholder="已配置时可留空" /></label>
+                <label id="providerKeyField" class="full"><span>API Key</span><input id="providerKey" type="password" autocomplete="off" placeholder="已配置时可留空" /></label>
                 <div class="full"><button class="primary" type="submit">保存模型设置</button></div>
               </form>
             </section>

@@ -35,6 +35,10 @@ export class Sub2APIClient {
     return Boolean(this.adminAPIKey);
   }
 
+  get gatewayBaseURL() {
+    return `${this.baseURL}/v1`;
+  }
+
   async request(path, { method = "GET", body, token, admin = false, idempotencyKey } = {}) {
     const headers = { Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -96,6 +100,43 @@ export class Sub2APIClient {
       if (error.status !== 404) throw error;
       return this.request("/api/v1/auth/me", { token: accessToken });
     }
+  }
+
+  listAPIKeys(accessToken, { search = "JobDeck", pageSize = 50 } = {}) {
+    const query = new URLSearchParams({ page: "1", page_size: String(pageSize), search });
+    return this.request(`/api/v1/keys?${query}`, { token: accessToken });
+  }
+
+  createAPIKey(accessToken, { name = "JobDeck", idempotencyKey } = {}) {
+    return this.request("/api/v1/keys", {
+      method: "POST",
+      token: accessToken,
+      idempotencyKey,
+      body: { name }
+    });
+  }
+
+  updateAPIKey(accessToken, id, updates) {
+    return this.request(`/api/v1/keys/${encodeURIComponent(String(id))}`, {
+      method: "PUT",
+      token: accessToken,
+      body: updates
+    });
+  }
+
+  async ensureAPIKey(accessToken, { name = "JobDeck", accountId = "account" } = {}) {
+    const page = await this.listAPIKeys(accessToken, { search: name });
+    const keys = Array.isArray(page) ? page : Array.isArray(page?.items) ? page.items : [];
+    let key = keys.find((item) => String(item?.name || "").trim().toLowerCase() === name.toLowerCase());
+    if (key && key.status !== "active") key = await this.updateAPIKey(accessToken, key.id, { status: "active" });
+    if (!key) {
+      key = await this.createAPIKey(accessToken, {
+        name,
+        idempotencyKey: `jobdeck-api-key-${accountId}`
+      });
+    }
+    if (!key?.key) throw new Sub2APIError("账号 API Key 创建成功，但服务未返回密钥", 502, "API_KEY_MISSING");
+    return key;
   }
 
   rewardUser({ userId, amount, rewardCode, notes }) {

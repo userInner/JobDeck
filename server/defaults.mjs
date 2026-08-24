@@ -24,6 +24,7 @@ export function createDefaultState() {
       mode: "openai-responses",
       baseURL: "https://api.openai.com/v1",
       model: "gpt-5.4",
+      source: "manual",
       configured: false
     },
     jobs: [],

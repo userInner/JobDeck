@@ -69,6 +69,16 @@ function accountError(res, error) {
   res.status(status).json({ error: expected ? error.message : "服务暂时不可用", code: expected ? error.code : "INTERNAL_ERROR" });
 }
 
+function sessionAccessToken(session) {
+  return String(session?.access_token || session?.accessToken || "").trim();
+}
+
+async function prepareAccountSession(session) {
+  const token = sessionAccessToken(session);
+  if (token && multiUserMode) await tenantRuntime.fromAccessToken(token);
+  return session;
+}
+
 // 账号接口在租户中间件之前；登录成功后，后续工作台 API 再由 Access Token 解析到独立租户。
 app.get("/api/account/config", rateLimit("account-config", 60, 60_000), async (_req, res) => {
   try {
@@ -100,7 +110,7 @@ app.post("/api/account/register", rateLimit("register", 5, 30 * 60_000), async (
     const verifyCode = String(req.body?.verifyCode || "").trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "请填写有效邮箱" });
     if (password.length < 6) return res.status(400).json({ error: "密码至少需要 6 个字符" });
-    const data = await sub2api.register({ email, password, verify_code: verifyCode });
+    const data = await prepareAccountSession(await sub2api.register({ email, password, verify_code: verifyCode }));
     res.json(data);
   } catch (error) { accountError(res, error); }
 });
@@ -110,12 +120,12 @@ app.post("/api/account/login", rateLimit("login", 12, 10 * 60_000), async (req, 
     const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
     if (!email || !password) return res.status(400).json({ error: "请输入邮箱和密码" });
-    res.json(await sub2api.login(email, password));
+    res.json(await prepareAccountSession(await sub2api.login(email, password)));
   } catch (error) { accountError(res, error); }
 });
 
 app.post("/api/account/refresh", rateLimit("refresh", 30, 10 * 60_000), async (req, res) => {
-  try { res.json(await sub2api.refresh(String(req.body?.refreshToken || ""))); }
+  try { res.json(await prepareAccountSession(await sub2api.refresh(String(req.body?.refreshToken || "")))); }
   catch (error) { accountError(res, error); }
 });
 
@@ -129,7 +139,11 @@ app.post("/api/account/logout", rateLimit("logout", 30, 10 * 60_000), async (req
 });
 
 app.get("/api/account/me", rateLimit("account-me", 60, 60_000), async (req, res) => {
-  try { res.json(await sub2api.profile(accountToken(req))); }
+  try {
+    const token = accountToken(req);
+    const tenant = multiUserMode ? await tenantRuntime.fromAccessToken(token) : null;
+    res.json(tenant?.profile || await sub2api.profile(token));
+  }
   catch (error) { accountError(res, error); }
 });
 

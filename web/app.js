@@ -437,6 +437,12 @@ function renderSettings() {
   setValueUnlessFocused("#settingsLocations", state.candidate.locations.join("\n"));
   setValueUnlessFocused("#salaryFloor", state.candidate.salaryFloorK);
   setValueUnlessFocused("#salaryUpper", state.candidate.salaryUpperTargetK);
+  const managed = state.provider.source === "sub2api";
+  $("#providerKeyField").hidden = managed;
+  $("#providerBaseURL").readOnly = managed;
+  $("#providerStorageHint").textContent = managed
+    ? "已自动使用当前账号的 Sub2API API Key"
+    : "密钥仅保存在你的 JobDeck 服务";
   renderAccount();
 }
 
