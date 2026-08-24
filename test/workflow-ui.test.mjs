@@ -15,6 +15,16 @@ test("dashboard workflow exposes exactly the two primary automatic actions", () 
   assert.doesNotMatch(actions, /分析当前候选|手动检查候选|继续扫描列表/);
 });
 
+test("masthead exposes a compact companion extension download", () => {
+  const html = fs.readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+  const css = fs.readFileSync(new URL("../web/styles.css", import.meta.url), "utf8");
+  assert.match(html, /class="companion-download"/);
+  assert.match(html, />安装配套插件<\/a>/);
+  assert.match(html, /href="\/downloads\/JobDeck-Chrome-Extension-v0\.16\.0\.zip"/);
+  assert.match(html, /download="JobDeck-Chrome-Extension-v0\.16\.0\.zip"/);
+  assert.match(css, /\.companion-download\s*\{/);
+});
+
 test("automatic resume action uses the single composite endpoint", () => {
   const source = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
   assert.match(source, /action === "auto-resume"/);

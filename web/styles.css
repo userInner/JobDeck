@@ -50,6 +50,22 @@ h2 { margin: 0; font-size: 19px; letter-spacing: -.025em; }
 .state-pill { border: 1px solid currentColor; padding: 6px 9px; font: 700 10px/1 ui-monospace, monospace; }
 .state-pill.on { color: var(--teal); background: #eaf6f2; }
 .state-pill.off { color: var(--red); background: #fff1ed; }
+.companion-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-bottom: 1px solid var(--blue);
+  color: var(--blue);
+  padding: 5px 2px 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.companion-download span { color: var(--amber); font: 900 13px/1 ui-monospace, monospace; }
+.companion-download:hover { color: var(--teal); border-bottom-color: var(--teal); }
+.companion-download:focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; }
 .pause-button { border: 1px solid var(--red); background: transparent; color: var(--red); padding: 7px 11px; font-size: 11px; }
 .pause-button.resume { border-color: var(--teal); color: var(--teal); }
 .view { display: none; padding-top: 18px; }
