@@ -1,0 +1,4 @@
+{$JOBDECK_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy jobdeck:43120
+}

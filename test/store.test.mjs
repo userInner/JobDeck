@@ -21,6 +21,21 @@ test("store persists state and keeps secrets out of public payload", () => {
   }
 });
 
+test("deployment access token becomes the extension pairing token without entering public state", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-store-"));
+  const previous = process.env.JOBDECK_ACCESS_TOKEN;
+  try {
+    process.env.JOBDECK_ACCESS_TOKEN = "deployment-token-1234567890123456";
+    const store = new Store(directory);
+    assert.equal(store.secrets.extensionToken, process.env.JOBDECK_ACCESS_TOKEN);
+    assert.equal(store.publicState().extensionToken, undefined);
+  } finally {
+    if (previous === undefined) delete process.env.JOBDECK_ACCESS_TOKEN;
+    else process.env.JOBDECK_ACCESS_TOKEN = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("old state gains the first-run workflow without losing saved jobs", () => {
   const merged = mergeStateDefaults({ version: 2, jobs: [], workflow: { phase: "not-started", batch: [] } }, {
     version: 1,

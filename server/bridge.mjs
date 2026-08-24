@@ -48,7 +48,12 @@ function actionLabel(action) {
 export class BrowserBridge {
   constructor(store) {
     this.store = store;
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({
+      noServer: true,
+      handleProtocols(protocols) {
+        return protocols.has("jobdeck") ? "jobdeck" : false;
+      }
+    });
     this.extension = null;
     this.pending = new Map();
     this.lastPage = null;
@@ -59,7 +64,13 @@ export class BrowserBridge {
     server.on("upgrade", (req, socket, head) => {
       const url = new URL(req.url, "http://127.0.0.1");
       const origin = req.headers.origin || "";
-      if (url.pathname !== "/extension" || url.searchParams.get("token") !== this.store.secrets.extensionToken || !origin.startsWith("chrome-extension://")) {
+      const protocols = String(req.headers["sec-websocket-protocol"] || "").split(",").map((item) => item.trim());
+      const protocolToken = protocols.find((item) => item.startsWith("token."))?.slice(6) || "";
+      const suppliedToken = protocolToken || url.searchParams.get("token") || "";
+      const supplied = Buffer.from(suppliedToken);
+      const expected = Buffer.from(this.store.secrets.extensionToken);
+      const tokenMatches = supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+      if (url.pathname !== "/extension" || !tokenMatches || !origin.startsWith("chrome-extension://")) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;

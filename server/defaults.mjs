@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEFAULT_PORT = Number(process.env.JOBDECK_PORT || 43120);
-export const DEFAULT_HOST = "127.0.0.1";
+export const DEFAULT_HOST = String(process.env.JOBDECK_HOST || "127.0.0.1").trim();
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export function createDefaultState() {

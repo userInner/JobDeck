@@ -8,6 +8,15 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <section id="authGate" class="auth-gate" aria-labelledby="authTitle" hidden>
+      <form id="authForm" class="auth-card">
+        <p class="eyebrow">SECURE REMOTE ACCESS</p>
+        <h1 id="authTitle">解锁 JobDeck 工作台</h1>
+        <p id="authMessage">输入服务器部署时设置的访问令牌。令牌只保留在当前标签页会话中。</p>
+        <label><span>访问令牌</span><input id="accessToken" type="password" autocomplete="current-password" required /></label>
+        <button class="primary" type="submit">验证并进入</button>
+      </form>
+    </section>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>LOCAL JOB DESK</small></div></div>
@@ -20,7 +29,7 @@
         </nav>
         <div class="sidebar-foot">
           <span id="privacyDot" class="status-dot"></span>
-          <p><strong>数据留在本机</strong><small id="dataStatus">正在连接服务</small></p>
+          <p><strong>数据由你掌控</strong><small id="dataStatus">正在连接服务</small></p>
         </div>
       </aside>
 
@@ -172,7 +181,7 @@
         <section id="view-settings" class="view">
           <div class="settings-grid">
             <section class="panel settings-panel">
-              <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span class="muted">密钥仅保存在本机</span></div>
+              <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span class="muted">密钥仅保存在你的 JobDeck 服务</span></div>
               <form id="providerForm" class="settings-form">
                 <label><span>接口模式</span><select id="providerMode"><option value="openai-responses">OpenAI Responses</option><option value="compatible-chat">OpenAI-compatible Chat</option></select></label>
                 <label><span>模型名称</span><input id="providerModel" placeholder="gpt-5.4" required /></label>

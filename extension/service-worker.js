@@ -26,7 +26,7 @@ async function connect() {
   }
   try {
     const previousSocket = socket;
-    const nextSocket = new WebSocket(`${config.bridgeUrl}?token=${encodeURIComponent(config.token)}`);
+    const nextSocket = new WebSocket(config.bridgeUrl, ["jobdeck", `token.${config.token}`]);
     socket = nextSocket;
     previousSocket?.close();
     nextSocket.onopen = () => {

@@ -1,6 +1,6 @@
 {
   "name": "jobdeck-local",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "private": true,
   "type": "module",
   "description": "Local-first AI job search workspace with a real-Chrome extension.",
@@ -8,7 +8,8 @@
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
     "check": "node --test test/*.test.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "package:extension": "sh scripts/package-extension.sh"
   },
   "engines": {
     "node": ">=22"

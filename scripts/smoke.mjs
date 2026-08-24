@@ -26,7 +26,7 @@ async function waitForServer() {
 try {
   await waitForServer();
   const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((response) => response.json());
-  if (!health.ok || health.service !== "jobdeck-local") throw new Error("健康检查内容不正确");
+  if (!health.ok || health.service !== "jobdeck") throw new Error("健康检查内容不正确");
   const state = await fetch(`http://127.0.0.1:${port}/api/state`).then((response) => response.json());
   if (!state.candidate || !state.workflow || !state.pairingToken || !Array.isArray(state.pendingActions)) throw new Error("状态接口缺少字段");
   process.stdout.write("JobDeck smoke test passed\n");

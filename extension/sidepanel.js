@@ -50,7 +50,7 @@ function render(next) {
   elements.setup.classList.toggle("hidden", paired);
   elements.workspace.classList.toggle("hidden", !paired);
   elements.chromeDot.classList.toggle("on", next.extension.connected);
-  elements.connection.textContent = next.extension.connected ? "本机工作台与 Chrome 已连接" : "等待 Chrome 执行器连接";
+  elements.connection.textContent = next.extension.connected ? "JobDeck 工作台与 Chrome 已连接" : "等待 Chrome 执行器连接";
   elements.pause.textContent = next.extension.paused ? "恢复" : "暂停";
   elements.pause.classList.toggle("resume", next.extension.paused);
   elements.count.textContent = next.pendingActions.length;
@@ -115,7 +115,7 @@ async function refresh() {
     }
     render(next);
   } catch (error) {
-    elements.connection.textContent = "JobDeck 本地服务未启动";
+    elements.connection.textContent = "JobDeck 工作台未连接";
     elements.chromeDot.classList.remove("on");
     if (token) showToast(error.message);
   }
@@ -128,9 +128,9 @@ $("#pair").addEventListener("click", async () => {
     await chrome.storage.local.set({ token });
     await chrome.runtime.sendMessage({ type: "reconnect" });
     render(next);
-    showToast("已连接本机 JobDeck");
+    showToast("已连接 JobDeck 工作台");
   } catch {
-    showToast("请先启动 JobDeck 本地应用");
+    showToast("本机未启动时，请在设置中填写远程地址与访问令牌");
   }
 });
 

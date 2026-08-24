@@ -7,6 +7,8 @@ let chatMessages = [];
 let toastTimer;
 let workflowSelection = new Set();
 let workflowSelectionRunId = "";
+const accessTokenKey = "jobdeckAccessToken";
+let accessToken = sessionStorage.getItem(accessTokenKey) || "";
 
 const titles = {
   dashboard: "今天先做对的岗位",
@@ -33,11 +35,26 @@ function toast(message) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { "X-JobDeck-Token": accessToken } : {}),
+      ...(options.headers || {})
+    }
   });
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) showAuthGate(data.error);
   if (!response.ok) throw new Error(data.error || "操作失败");
   return data;
+}
+
+function showAuthGate(message = "此工作台已启用远程访问保护") {
+  $("#authMessage").textContent = message;
+  $("#authGate").hidden = false;
+  queueMicrotask(() => $("#accessToken")?.focus());
+}
+
+function hideAuthGate() {
+  $("#authGate").hidden = true;
 }
 
 function setBusy(button, busy, label = "处理中…") {
@@ -62,11 +79,12 @@ function go(view) {
 async function refresh() {
   try {
     state = await api("/api/state");
+    hideAuthGate();
     render();
     $("#privacyDot").classList.add("on");
-    $("#dataStatus").textContent = "本地服务已连接";
+    $("#dataStatus").textContent = "JobDeck 服务已连接";
   } catch (error) {
-    $("#dataStatus").textContent = "本地服务未连接";
+    $("#dataStatus").textContent = error.message.includes("访问令牌") ? "等待访问令牌" : "JobDeck 服务未连接";
     $("#privacyDot").classList.remove("on");
     toast(error.message);
   }
@@ -667,7 +685,10 @@ $("#chatForm").addEventListener("submit", async (event) => {
 async function streamChat(payload, onDelta, onAction = () => {}) {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { "X-JobDeck-Token": accessToken } : {})
+    },
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
@@ -835,6 +856,21 @@ $("#targetForm").addEventListener("submit", async (event) => {
     await refresh();
   } catch (error) { toast(error.message); }
   finally { setBusy(button, false); }
+});
+
+$("#authForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const candidate = $("#accessToken").value.trim();
+  if (!candidate) return;
+  accessToken = candidate;
+  sessionStorage.setItem(accessTokenKey, candidate);
+  $("#authMessage").textContent = "正在验证…";
+  try {
+    await refresh();
+    $("#accessToken").value = "";
+  } catch {
+    showAuthGate("访问令牌无效，请检查服务器部署配置");
+  }
 });
 
 refresh();

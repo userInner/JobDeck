@@ -37,7 +37,11 @@ export class Store {
       return normalized;
     });
     this.secrets = this.loadJson(this.secretsFile, {});
-    if (!this.secrets.extensionToken) {
+    const configuredAccessToken = String(process.env.JOBDECK_ACCESS_TOKEN || "").trim();
+    if (configuredAccessToken && this.secrets.extensionToken !== configuredAccessToken) {
+      this.secrets.extensionToken = configuredAccessToken;
+      this.saveSecrets();
+    } else if (!this.secrets.extensionToken) {
       this.secrets.extensionToken = crypto.randomBytes(24).toString("base64url");
       this.saveSecrets();
     }

@@ -1,6 +1,6 @@
 # JobDeck
 
-JobDeck 是一个 local-first 的 AI 求职 Agent。它把本地 Web 工作台与用户自己的 Chrome 会话连接起来，让模型围绕最终目标持续执行“观察 → 规划 → 操作 → 验证”，而不是把求职过程写死成一组固定按钮。
+JobDeck 是一个 self-hosted、local-Chrome 的 AI 求职 Agent。它把你自己掌控的 Web 工作台与用户自己的 Chrome 会话连接起来，让模型围绕最终目标持续执行“观察 → 规划 → 操作 → 验证”，而不是把求职过程写死成一组固定按钮。工作台既可在本机运行，也可部署到自己的服务器；浏览器操作始终由用户本机安装的扩展执行。
 
 项目当前重点适配 BOSS 直聘，同时保留通用浏览器工具接口，便于继续增加其他招聘网站与求职动作。
 
@@ -51,12 +51,20 @@ npm start
 
 ## 安装 Chrome 扩展
 
-1. 打开 `chrome://extensions`。
-2. 开启“开发者模式”。
-3. 点击“加载已解压的扩展程序”，选择本项目的 `extension` 目录。
+1. 从 GitHub Releases 下载 `JobDeck-Chrome-Extension-*.zip` 并解压；开发者也可直接使用仓库的 `extension` 目录。
+2. 打开 `chrome://extensions`，开启“开发者模式”。
+3. 点击“加载已解压的扩展程序”，选择解压后的 `JobDeck-Chrome-Extension` 目录。
 4. 固定“JobDeck 求职执行器”，打开侧边栏。
 5. 启动本地工作台后，在侧边栏连接 JobDeck。
 6. 首次访问招聘网站时，按站点授予访问权限。
+
+使用远程工作台时，在扩展设置填写：
+
+```text
+Web 工作台：https://你的域名
+执行通道：wss://你的域名/extension
+访问令牌：服务器中的 JOBDECK_ACCESS_TOKEN
+```
 
 扩展通过 Chrome 的 `debugger` 权限调用输入协议。执行期间页面会显示 JobDeck 光标，Chrome 也会显示调试提示；任务暂停或单步完成后会释放控制。
 
@@ -70,13 +78,46 @@ npm start
 
 默认接口地址是 `https://api.openai.com/v1`。也可以使用自建或兼容服务，但远程地址必须使用 HTTPS。
 
-API Key 保存在：
+本机运行时，API Key 保存在：
 
 ```text
 ~/.jobdeck-local/secrets.json
 ```
 
 密钥不会返回给 Web 页面或 Chrome 扩展。
+
+## 部署到服务器
+
+推荐使用带域名的 Linux 服务器。远程扩展连接必须使用 HTTPS/WSS；仓库中的 Caddy 会自动申请并续期证书，同时代理 WebSocket。
+
+```bash
+git clone https://github.com/userInner/JobDeck.git
+cd JobDeck
+cp .env.example .env
+```
+
+编辑 `.env`，把域名改成已经解析到服务器的域名，并生成访问令牌：
+
+```bash
+openssl rand -hex 32
+```
+
+然后启动：
+
+```bash
+docker compose --env-file .env -f deploy/compose.https.yaml up -d --build
+```
+
+服务器需要开放 TCP 80、TCP 443 和 UDP 443。运行数据保存在 Docker 的 `jobdeck_data` 卷中；更新代码后重新执行上述启动命令即可。建议同时备份该卷，并妥善保存 `.env`。
+
+安全约束：
+
+- 只要服务监听非回环地址，`JOBDECK_ACCESS_TOKEN` 就是必填项，且至少 24 个字符。
+- 除健康检查外，所有 API 都需要访问令牌；Web 工作台会在首次进入时要求解锁。
+- 扩展与服务端通过 WSS 连接，令牌放在 WebSocket 子协议中，不放在页面 URL。
+- 不要把 `.env`、模型 API Key、简历或求职数据提交到 GitHub。
+
+如果已经有 Nginx、Traefik 或 Cloudflare Tunnel，也可以只运行 Dockerfile 中的 JobDeck 服务并自行反向代理 `43120`；反向代理必须支持 WebSocket Upgrade。
 
 ## BOSS 直聘适配
 
@@ -100,7 +141,7 @@ API Key 保存在：
 
 ## 本地数据
 
-运行数据默认保存在：
+本机运行时，数据默认保存在：
 
 ```text
 ~/.jobdeck-local/state.json
@@ -124,7 +165,16 @@ server/      本地服务、Agent 运行时、模型和任务状态
 web/         Web 工作台
 test/        Node.js 回归测试
 scripts/     启动与冒烟测试
+deploy/      Docker Compose 与自动 HTTPS 配置
 ```
+
+生成扩展安装包：
+
+```bash
+npm run package:extension
+```
+
+产物位于 `dist/`，发布到 GitHub Release，而不进入 Git 历史。
 
 ## 当前状态
 

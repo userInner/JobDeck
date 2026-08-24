@@ -1,0 +1,38 @@
+name: jobdeck
+
+services:
+  jobdeck:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      JOBDECK_HOST: 0.0.0.0
+      JOBDECK_PORT: 43120
+      JOBDECK_DATA_DIR: /data
+      JOBDECK_ACCESS_TOKEN: ${JOBDECK_ACCESS_TOKEN:?请在 .env 中设置 JOBDECK_ACCESS_TOKEN}
+    volumes:
+      - jobdeck_data:/data
+    expose:
+      - "43120"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - jobdeck
+    environment:
+      JOBDECK_DOMAIN: ${JOBDECK_DOMAIN:?请在 .env 中设置 JOBDECK_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  jobdeck_data:
+  caddy_data:
+  caddy_config:

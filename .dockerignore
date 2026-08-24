@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+dist
+assets
+data
+test
+docs
+*.log
+*.zip
+.env
+.DS_Store

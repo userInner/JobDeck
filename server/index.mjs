@@ -26,13 +26,34 @@ store.update((state) => {
 const ai = new AIService(store);
 const bridge = new BrowserBridge(store);
 bridge.attach(server);
+const accessToken = String(process.env.JOBDECK_ACCESS_TOKEN || "").trim();
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+const remoteMode = Boolean(accessToken);
+
+if (!loopbackHosts.has(DEFAULT_HOST) && accessToken.length < 24) {
+  throw new Error("公开监听 JobDeck 时必须设置至少 24 个字符的 JOBDECK_ACCESS_TOKEN");
+}
 
 app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 
 function trustedWrite(req) {
-  if (!req.headers.origin || req.headers.origin === `http://${DEFAULT_HOST}:${DEFAULT_PORT}`) return true;
-  const token = req.headers["x-jobdeck-token"];
+  if (!remoteMode && (!req.headers.origin || [
+    `http://${DEFAULT_HOST}:${DEFAULT_PORT}`,
+    `http://127.0.0.1:${DEFAULT_PORT}`,
+    `http://localhost:${DEFAULT_PORT}`
+  ].includes(req.headers.origin))) return true;
+  return trustedToken(req);
+}
+
+function requestToken(req) {
+  const authorization = String(req.headers.authorization || "");
+  if (authorization.toLowerCase().startsWith("bearer ")) return authorization.slice(7).trim();
+  return req.headers["x-jobdeck-token"];
+}
+
+function trustedToken(req) {
+  const token = requestToken(req);
   if (typeof token !== "string") return false;
   const supplied = Buffer.from(token);
   const expected = Buffer.from(store.secrets.extensionToken);
@@ -40,8 +61,12 @@ function trustedWrite(req) {
 }
 
 app.use("/api", (req, res, next) => {
+  if (req.path === "/health") return next();
+  if (remoteMode && !trustedToken(req)) {
+    return res.status(401).json({ error: "请输入 JobDeck 访问令牌", code: "AUTH_REQUIRED" });
+  }
   if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && !trustedWrite(req)) {
-    return res.status(403).json({ error: "请求没有通过本机授权" });
+    return res.status(403).json({ error: "请求没有通过 JobDeck 授权" });
   }
   next();
 });
@@ -1589,7 +1614,7 @@ if (["planning", "executing", "waiting"].includes(store.state.workflow.agent?.st
   });
 }
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck-local", version: "0.12.1" }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.13.0", remoteMode }));
 app.get("/api/state", (_req, res) => res.json(statePayload()));
 
 app.post("/api/provider", (req, res) => {
@@ -2449,7 +2474,7 @@ app.use((_req, res) => {
 });
 
 server.listen(DEFAULT_PORT, DEFAULT_HOST, () => {
-  process.stderr.write(`JobDeck Local is ready at http://${DEFAULT_HOST}:${DEFAULT_PORT}\n`);
+  process.stderr.write(`JobDeck is ready at http://${DEFAULT_HOST}:${DEFAULT_PORT}${remoteMode ? " (access token required)" : ""}\n`);
 });
 
 export { app, bridge, server, store };

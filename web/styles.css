@@ -336,3 +336,29 @@ select, input, textarea { border: 1px solid #aeb8b8; background: white; color: v
 }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+.auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 31, 42, 0.86);
+  backdrop-filter: blur(10px);
+}
+
+.auth-gate[hidden] { display: none; }
+
+.auth-card {
+  width: min(480px, 100%);
+  padding: 38px;
+  border: 1px solid #263746;
+  border-top: 8px solid #d39b27;
+  background: #fffdf7;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.28);
+}
+
+.auth-card h1 { margin: 8px 0 12px; font-size: 34px; }
+.auth-card p:not(.eyebrow) { color: #68747d; line-height: 1.7; }
+.auth-card label { display: grid; gap: 8px; margin: 24px 0 18px; font-weight: 700; }
+.auth-card input { min-height: 50px; padding: 0 14px; border: 1px solid #aeb8bd; font: inherit; }
