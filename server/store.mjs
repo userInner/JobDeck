@@ -21,7 +21,7 @@ export function mergeStateDefaults(defaults, saved) {
 }
 
 export class Store {
-  constructor(directory = process.env.JOBDECK_DATA_DIR || path.join(os.homedir(), ".jobdeck-local")) {
+  constructor(directory = process.env.JOBDECK_DATA_DIR || path.join(os.homedir(), ".jobdeck-local"), options = {}) {
     this.directory = directory;
     this.stateFile = path.join(directory, "state.json");
     this.secretsFile = path.join(directory, "secrets.json");
@@ -37,7 +37,7 @@ export class Store {
       return normalized;
     });
     this.secrets = this.loadJson(this.secretsFile, {});
-    const configuredAccessToken = String(process.env.JOBDECK_ACCESS_TOKEN || "").trim();
+    const configuredAccessToken = String(options.accessToken ?? process.env.JOBDECK_ACCESS_TOKEN ?? "").trim();
     if (configuredAccessToken && this.secrets.extensionToken !== configuredAccessToken) {
       this.secrets.extensionToken = configuredAccessToken;
       this.saveSecrets();

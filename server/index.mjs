@@ -6,69 +6,150 @@ import express from "express";
 import { GoalAgentRuntime } from "./agent-runtime.mjs";
 import { AIService } from "./ai.mjs";
 import { findPageControl, rankAnalyzedJobs, verificationReason } from "./autopilot.mjs";
-import { BrowserBridge, CONTROLLED } from "./bridge.mjs";
+import { CONTROLLED } from "./bridge.mjs";
 import { DEFAULT_HOST, DEFAULT_PORT } from "./defaults.mjs";
 import { inferCompanyName, jobCandidatesFromPage, jobFromPage, mergeJobInput } from "./jobs.mjs";
 import { buildResumeWritePlan } from "./resume-plan.mjs";
 import { bossSearchUrl, buildAutomaticSearchPlans } from "./search-plan.mjs";
-import { Store } from "./store.mjs";
+import { StarRewardError, StarRewardService } from "./star-rewards.mjs";
+import { Sub2APIClient, Sub2APIError } from "./sub2api-client.mjs";
+import { TenantRuntimeManager } from "./tenant-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const app = express();
 const server = http.createServer(app);
-const store = new Store();
-store.update((state) => {
-  for (const job of state.jobs) {
-    if (job.company && job.company !== "待识别公司") continue;
-    job.company = inferCompanyName(job);
-  }
+const sub2api = new Sub2APIClient();
+const multiUserMode = String(process.env.JOBDECK_MULTI_USER || "").toLowerCase() === "true";
+const tenantRuntime = new TenantRuntimeManager({
+  directory: process.env.JOBDECK_DATA_DIR,
+  sub2api,
+  multiUser: multiUserMode
 });
+const store = tenantRuntime.store;
+const bridge = tenantRuntime.bridge;
 const ai = new AIService(store);
-const bridge = new BrowserBridge(store);
-bridge.attach(server);
-const accessToken = String(process.env.JOBDECK_ACCESS_TOKEN || "").trim();
+tenantRuntime.attach(server);
+const starRewards = new StarRewardService({ sub2api });
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
-const remoteMode = Boolean(accessToken);
+const remoteMode = multiUserMode || !loopbackHosts.has(DEFAULT_HOST);
 
-if (!loopbackHosts.has(DEFAULT_HOST) && accessToken.length < 24) {
-  throw new Error("公开监听 JobDeck 时必须设置至少 24 个字符的 JOBDECK_ACCESS_TOKEN");
+if (!loopbackHosts.has(DEFAULT_HOST) && !multiUserMode) {
+  const accessToken = String(process.env.JOBDECK_ACCESS_TOKEN || "").trim();
+  if (accessToken.length < 24) throw new Error("公开监听单用户 JobDeck 时必须设置至少 24 个字符的 JOBDECK_ACCESS_TOKEN");
 }
 
 app.disable("x-powered-by");
+if (remoteMode) app.set("trust proxy", 1);
 app.use(express.json({ limit: "2mb" }));
 
-function trustedWrite(req) {
-  if (!remoteMode && (!req.headers.origin || [
-    `http://${DEFAULT_HOST}:${DEFAULT_PORT}`,
-    `http://127.0.0.1:${DEFAULT_PORT}`,
-    `http://localhost:${DEFAULT_PORT}`
-  ].includes(req.headers.origin))) return true;
-  return trustedToken(req);
-}
-
-function requestToken(req) {
+function accountToken(req) {
   const authorization = String(req.headers.authorization || "");
-  if (authorization.toLowerCase().startsWith("bearer ")) return authorization.slice(7).trim();
-  return req.headers["x-jobdeck-token"];
+  return authorization.toLowerCase().startsWith("bearer ") ? authorization.slice(7).trim() : "";
 }
 
-function trustedToken(req) {
-  const token = requestToken(req);
-  if (typeof token !== "string") return false;
-  const supplied = Buffer.from(token);
-  const expected = Buffer.from(store.secrets.extensionToken);
-  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+const rateBuckets = new Map();
+function rateLimit(name, limit, windowMs) {
+  return (req, res, next) => {
+    const key = `${name}:${req.ip || req.socket.remoteAddress || "unknown"}`;
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+    if (!bucket || bucket.resetAt <= now) {
+      rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    bucket.count += 1;
+    if (bucket.count > limit) return res.status(429).json({ error: "请求过于频繁，请稍后再试", code: "RATE_LIMITED" });
+    next();
+  };
 }
+
+function accountError(res, error) {
+  const expected = error instanceof Sub2APIError || error instanceof StarRewardError;
+  const status = expected && Number.isInteger(error.status) ? error.status : 500;
+  res.status(status).json({ error: expected ? error.message : "服务暂时不可用", code: expected ? error.code : "INTERNAL_ERROR" });
+}
+
+// 账号接口在租户中间件之前；登录成功后，后续工作台 API 再由 Access Token 解析到独立租户。
+app.get("/api/account/config", rateLimit("account-config", 60, 60_000), async (_req, res) => {
+  try {
+    const settings = await sub2api.publicSettings();
+    res.json({
+      enabled: true,
+      siteName: settings.site_name || "OnPeople",
+      registrationEnabled: settings.registration_enabled !== false,
+      emailVerifyEnabled: Boolean(settings.email_verify_enabled),
+      multiUser: multiUserMode,
+      reward: { enabled: starRewards.enabled, amount: starRewards.amount, repository: starRewards.repository }
+    });
+  } catch (error) { accountError(res, error); }
+});
+
+app.post("/api/account/send-code", rateLimit("send-code", 3, 10 * 60_000), async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "请填写有效邮箱" });
+    await sub2api.sendVerifyCode(email);
+    res.json({ ok: true });
+  } catch (error) { accountError(res, error); }
+});
+
+app.post("/api/account/register", rateLimit("register", 5, 30 * 60_000), async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const verifyCode = String(req.body?.verifyCode || "").trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "请填写有效邮箱" });
+    if (password.length < 6) return res.status(400).json({ error: "密码至少需要 6 个字符" });
+    const data = await sub2api.register({ email, password, verify_code: verifyCode });
+    res.json(data);
+  } catch (error) { accountError(res, error); }
+});
+
+app.post("/api/account/login", rateLimit("login", 12, 10 * 60_000), async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    if (!email || !password) return res.status(400).json({ error: "请输入邮箱和密码" });
+    res.json(await sub2api.login(email, password));
+  } catch (error) { accountError(res, error); }
+});
+
+app.post("/api/account/refresh", rateLimit("refresh", 30, 10 * 60_000), async (req, res) => {
+  try { res.json(await sub2api.refresh(String(req.body?.refreshToken || ""))); }
+  catch (error) { accountError(res, error); }
+});
+
+app.post("/api/account/logout", rateLimit("logout", 30, 10 * 60_000), async (req, res) => {
+  try {
+    const refreshToken = String(req.body?.refreshToken || "");
+    tenantRuntime.invalidateAccessToken(accountToken(req));
+    if (refreshToken) await sub2api.logout(refreshToken);
+    res.json({ ok: true });
+  } catch (error) { accountError(res, error); }
+});
+
+app.get("/api/account/me", rateLimit("account-me", 60, 60_000), async (req, res) => {
+  try { res.json(await sub2api.profile(accountToken(req))); }
+  catch (error) { accountError(res, error); }
+});
+
+app.post("/api/rewards/github-star/challenge", rateLimit("star-challenge", 5, 60 * 60_000), async (req, res) => {
+  try {
+    if (!starRewards.enabled) return res.status(503).json({ error: "Star 奖励尚未启用", code: "REWARD_DISABLED" });
+    res.json(await starRewards.createChallenge(accountToken(req), req.body?.username));
+  } catch (error) { accountError(res, error); }
+});
+
+app.post("/api/rewards/github-star/claim", rateLimit("star-claim", 8, 60 * 60_000), async (req, res) => {
+  try {
+    if (!starRewards.enabled) return res.status(503).json({ error: "Star 奖励尚未启用", code: "REWARD_DISABLED" });
+    res.json(await starRewards.claim(accountToken(req), { challengeId: req.body?.challengeId, gistUrl: req.body?.gistUrl }));
+  } catch (error) { accountError(res, error); }
+});
 
 app.use("/api", (req, res, next) => {
   if (req.path === "/health") return next();
-  if (remoteMode && !trustedToken(req)) {
-    return res.status(401).json({ error: "请输入 JobDeck 访问令牌", code: "AUTH_REQUIRED" });
-  }
-  if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && !trustedWrite(req)) {
-    return res.status(403).json({ error: "请求没有通过 JobDeck 授权" });
-  }
-  next();
+  tenantRuntime.middleware()(req, res, next);
 });
 
 function statePayload() {
@@ -1585,36 +1666,44 @@ async function runAutopilotApply(runId, selectedIds) {
   }
 }
 
-if (String(store.state.workflow.autopilot?.status).startsWith("running-")) {
-  setAutopilot({ status: "stopped", stage: "stopped", stopRequested: true, message: "本地服务曾中断，请重新授权一个批次" });
-}
-if (store.state.workflow.phase === "autopilot-blocked" && /Cannot read properties of null \(reading 'adapter'\)|页面读取脚本没有返回内容|BOSS 页面读取(?:通道不可用|失败)/.test(store.state.workflow.lastError || "")) {
-  setAutopilot({
-    status: "stopped",
-    stage: "stopped",
-    currentJobId: null,
-    stopRequested: true,
-    message: "上次因页面临时未读取到而暂停；问题已修复，可重新启动自动找工作"
-  });
-  setWorkflow({ phase: "shortlist", lastError: "" });
-}
-if (store.state.workflow.phase === "search-open" && /127\.0\.0\.1:43120/.test(store.state.workflow.lastError || "")) {
-  setWorkflow({ lastError: "" });
-}
-if (["planning", "executing", "waiting"].includes(store.state.workflow.agent?.status)) {
+tenantRuntime.setTenantInitializer(() => {
   store.update((state) => {
-    state.workflow.agent = {
-      ...state.workflow.agent,
-      status: "needs-attention",
-      currentTool: null,
-      waitFor: null,
-      message: "本地服务曾中断；为避免重复外部操作，任务没有自动续跑，请重新下达目标",
-      updatedAt: new Date().toISOString()
-    };
+    for (const job of state.jobs) {
+      if (job.company && job.company !== "待识别公司") continue;
+      job.company = inferCompanyName(job);
+    }
   });
-}
+  if (String(store.state.workflow.autopilot?.status).startsWith("running-")) {
+    setAutopilot({ status: "stopped", stage: "stopped", stopRequested: true, message: "服务曾中断，请重新授权一个批次" });
+  }
+  if (store.state.workflow.phase === "autopilot-blocked" && /Cannot read properties of null \(reading 'adapter'\)|页面读取脚本没有返回内容|BOSS 页面读取(?:通道不可用|失败)/.test(store.state.workflow.lastError || "")) {
+    setAutopilot({
+      status: "stopped",
+      stage: "stopped",
+      currentJobId: null,
+      stopRequested: true,
+      message: "上次因页面临时未读取到而暂停；问题已修复，可重新启动自动找工作"
+    });
+    setWorkflow({ phase: "shortlist", lastError: "" });
+  }
+  if (store.state.workflow.phase === "search-open" && /127\.0\.0\.1:43120/.test(store.state.workflow.lastError || "")) {
+    setWorkflow({ lastError: "" });
+  }
+  if (["planning", "executing", "waiting"].includes(store.state.workflow.agent?.status)) {
+    store.update((state) => {
+      state.workflow.agent = {
+        ...state.workflow.agent,
+        status: "needs-attention",
+        currentTool: null,
+        waitFor: null,
+        message: "服务曾中断；为避免重复外部操作，任务没有自动续跑，请重新下达目标",
+        updatedAt: new Date().toISOString()
+      };
+    });
+  }
+});
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.13.0", remoteMode }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.16.0", remoteMode, multiUser: multiUserMode }));
 app.get("/api/state", (_req, res) => res.json(statePayload()));
 
 app.post("/api/provider", (req, res) => {
@@ -1888,9 +1977,17 @@ async function agentBackgroundStatus(waitFor) {
   return { done: true, success: false, progress: false, summary: `未知后台任务：${waitFor}` };
 }
 
-const agentRuntime = new GoalAgentRuntime({ store, ai, tools: agentTools, observe: observeAgentState, waitStatus: agentBackgroundStatus });
+tenantRuntime.setAgentFactory((tenant) => new GoalAgentRuntime({
+  store: tenant.store,
+  ai: new AIService(tenant.store),
+  tools: agentTools,
+  observe: observeAgentState,
+  waitStatus: agentBackgroundStatus,
+  runInContext: (callback) => tenantRuntime.run(tenant, callback)
+}));
 
 async function routeToAgent(messages) {
+  const agentRuntime = tenantRuntime.agentRuntime();
   const sourceText = messages.at(-1)?.content || "";
   const route = await ai.routeAgentRequest(sourceText, agentRuntime.catalog(), store.state.workflow.agent);
   if (route.kind !== "agent") return null;
@@ -1965,6 +2062,7 @@ app.post("/api/chat/stream", async (req, res) => {
 });
 
 app.post("/api/agent/stop", (_req, res) => {
+  const agentRuntime = tenantRuntime.agentRuntime();
   const task = agentRuntime.stop();
   if (String(store.state.workflow.autopilot?.status || "").startsWith("running-")) {
     setAutopilot({ stopRequested: true, message: "Agent 已请求在当前安全边界后停止自动找工作…" });
@@ -2474,7 +2572,8 @@ app.use((_req, res) => {
 });
 
 server.listen(DEFAULT_PORT, DEFAULT_HOST, () => {
-  process.stderr.write(`JobDeck is ready at http://${DEFAULT_HOST}:${DEFAULT_PORT}${remoteMode ? " (access token required)" : ""}\n`);
+  const access = multiUserMode ? " (multi-user login required)" : remoteMode ? " (access token required)" : "";
+  process.stderr.write(`JobDeck is ready at http://${DEFAULT_HOST}:${DEFAULT_PORT}${access}\n`);
 });
 
 export { app, bridge, server, store };

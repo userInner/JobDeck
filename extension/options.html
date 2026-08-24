@@ -3,11 +3,11 @@
   <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>JobDeck 扩展设置</title><link rel="stylesheet" href="options.css" /></head>
   <body><main>
     <p class="eyebrow">WORKSPACE CONNECTION / 工作台连接</p><h1>连接 JobDeck</h1>
-    <p class="lead">可连接本机服务，也可连接你自行部署的 HTTPS 工作台。地址与访问令牌只保存在当前 Chrome 资料中。</p>
+    <p class="lead">可连接本机服务，也可连接多用户 HTTPS 工作台。地址与插件连接码只保存在当前 Chrome 资料中。</p>
     <form id="form">
       <label><span>Web 工作台地址</span><input id="apiUrl" type="url" value="http://127.0.0.1:43120" required /></label>
       <label><span>执行通道地址</span><input id="bridgeUrl" type="url" value="ws://127.0.0.1:43120/extension" required /></label>
-      <label><span>访问令牌 / 配对码</span><input id="token" type="password" autocomplete="off" placeholder="远程部署令牌或本机配对码" required /></label>
+      <label><span>插件连接码</span><input id="token" type="password" autocomplete="off" placeholder="登录工作台后复制连接码" required /></label>
       <div class="actions"><button type="submit">保存并连接</button><a id="openWorkspace" href="http://127.0.0.1:43120" target="_blank" rel="noreferrer">打开工作台</a></div>
     </form><p id="message" role="status"></p>
     <aside><strong>远程连接要求</strong><p>公网工作台必须使用 HTTPS 与 WSS。扩展不会填写密码、助记词、私钥或验证码；每个招聘网站仍需单独授权。</p></aside>

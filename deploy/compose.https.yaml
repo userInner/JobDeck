@@ -10,7 +10,12 @@ services:
       JOBDECK_HOST: 0.0.0.0
       JOBDECK_PORT: 43120
       JOBDECK_DATA_DIR: /data
-      JOBDECK_ACCESS_TOKEN: ${JOBDECK_ACCESS_TOKEN:?请在 .env 中设置 JOBDECK_ACCESS_TOKEN}
+      JOBDECK_MULTI_USER: ${JOBDECK_MULTI_USER:-true}
+      SUB2API_BASE_URL: ${SUB2API_BASE_URL:-https://sub2api.aibro.vip}
+      SUB2API_ADMIN_API_KEY: ${SUB2API_ADMIN_API_KEY:-}
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-userInner/JobDeck}
+      STAR_REWARD_USD: ${STAR_REWARD_USD:-5}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     volumes:
       - jobdeck_data:/data
     expose:

@@ -264,6 +264,34 @@ select, input, textarea { border: 1px solid #aeb8b8; background: white; color: v
 .history-item b { color: var(--teal); }
 .history-item b.error, .history-item b.rejected { color: var(--red); }
 .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.account-panel { grid-column: 1 / -1; }
+.account-body { padding: 0; }
+.account-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.account-columns > form + form { border-left: 1px solid var(--line); }
+.compact-form h3 { margin: 0; font-size: 13px; }
+.inline-control { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+.inline-control button { padding-inline: 11px; white-space: nowrap; }
+.account-summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 17px 18px; border-bottom: 1px solid var(--line); }
+.account-summary div { display: grid; gap: 3px; }
+.account-summary small, .account-summary span { color: var(--muted); font-size: 10px; }
+.account-summary strong { font-size: 14px; }
+.star-reward-card { display: grid; grid-template-columns: minmax(260px, .8fr) minmax(360px, 1.2fr); gap: 20px; padding: 20px; background: #fffaf0; }
+.star-reward-card h3 { margin: 4px 0 7px; font-size: 17px; }
+.star-reward-card p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.reward-controls { display: grid; align-content: center; grid-template-columns: 1fr auto; gap: 9px; }
+.reward-controls[hidden] { display: none; }
+.reward-controls label { grid-column: 1 / -1; }
+.reward-controls label span, .proof-step label span { display: block; margin-bottom: 6px; color: #46545b; font-size: 10px; font-weight: 700; }
+.proof-step { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; gap: 10px; padding-top: 16px; border-top: 1px solid #dccb9f; }
+.proof-step[hidden] { display: none; }
+.proof-step p, .proof-step pre, .proof-step label { grid-column: 1 / -1; }
+.proof-step pre { overflow: auto; margin: 0; padding: 12px; border: 1px solid #cfc4a7; background: white; font-size: 10px; white-space: pre-wrap; }
+.proof-step a { align-self: center; color: var(--teal); font-size: 10px; font-weight: 700; }
+
+@media (max-width: 760px) {
+  .account-columns, .star-reward-card { grid-template-columns: 1fr; }
+  .account-columns > form + form { border-left: 0; border-top: 1px solid var(--line); }
+}
 
 .toast { position: fixed; right: 24px; bottom: 24px; z-index: 10; max-width: 360px; transform: translateY(14px); opacity: 0; pointer-events: none; background: var(--ink); color: white; padding: 12px 15px; font-size: 11px; transition: .18s ease; }
 .toast.show { transform: translateY(0); opacity: 1; }

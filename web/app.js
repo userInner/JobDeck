@@ -9,6 +9,13 @@ let workflowSelection = new Set();
 let workflowSelectionRunId = "";
 const accessTokenKey = "jobdeckAccessToken";
 let accessToken = sessionStorage.getItem(accessTokenKey) || "";
+const accountTokenKey = "jobdeckSub2APIAccessToken";
+const accountRefreshKey = "jobdeckSub2APIRefreshToken";
+let accountAccessToken = sessionStorage.getItem(accountTokenKey) || "";
+let accountRefreshToken = sessionStorage.getItem(accountRefreshKey) || "";
+let accountConfig;
+let accountProfile;
+let starChallenge;
 
 const titles = {
   dashboard: "今天先做对的岗位",
@@ -32,25 +39,105 @@ function toast(message) {
   toastTimer = setTimeout(() => element.classList.remove("show"), 2400);
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, retried = false) {
   const response = await fetch(path, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      ...(accessToken ? { "X-JobDeck-Token": accessToken } : {}),
+      ...(accountAccessToken ? { Authorization: `Bearer ${accountAccessToken}` } : accessToken ? { "X-JobDeck-Token": accessToken } : {}),
       ...(options.headers || {})
     }
   });
+  if (response.status === 401 && !retried && accountRefreshToken && await refreshAccountSession()) {
+    return api(path, options, true);
+  }
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) showAuthGate(data.error);
   if (!response.ok) throw new Error(data.error || "操作失败");
   return data;
 }
 
-function showAuthGate(message = "此工作台已启用远程访问保护") {
+async function accountApi(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(accountAccessToken ? { Authorization: `Bearer ${accountAccessToken}` } : {}),
+      ...(options.headers || {})
+    }
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "账号操作失败");
+  return data;
+}
+
+function saveAccountSession(payload) {
+  accountAccessToken = payload?.access_token || payload?.accessToken || "";
+  accountRefreshToken = payload?.refresh_token || payload?.refreshToken || "";
+  if (accountAccessToken) sessionStorage.setItem(accountTokenKey, accountAccessToken);
+  if (accountRefreshToken) sessionStorage.setItem(accountRefreshKey, accountRefreshToken);
+}
+
+function clearAccountSession() {
+  accountAccessToken = "";
+  accountRefreshToken = "";
+  accountProfile = undefined;
+  starChallenge = undefined;
+  sessionStorage.removeItem(accountTokenKey);
+  sessionStorage.removeItem(accountRefreshKey);
+}
+
+async function refreshAccountSession() {
+  if (!accountRefreshToken) return false;
+  try {
+    const refreshed = await accountApi("/api/account/refresh", {
+      method: "POST",
+      body: JSON.stringify({ refreshToken: accountRefreshToken }),
+      headers: { Authorization: "" }
+    });
+    saveAccountSession(refreshed);
+    return Boolean(accountAccessToken);
+  } catch {
+    clearAccountSession();
+    return false;
+  }
+}
+
+async function loadAccountProfile() {
+  if (!accountAccessToken) return;
+  try {
+    accountProfile = await accountApi("/api/account/me");
+  } catch (error) {
+    if (!accountRefreshToken) {
+      clearAccountSession();
+      return;
+    }
+    try {
+      if (!(await refreshAccountSession())) return;
+      accountProfile = await accountApi("/api/account/me");
+    } catch {
+      clearAccountSession();
+    }
+  }
+}
+
+async function initializeAccount() {
+  try {
+    accountConfig = await accountApi("/api/account/config", { headers: { Authorization: "" } });
+    await loadAccountProfile();
+  } catch (error) {
+    accountConfig = { enabled: false, error: error.message };
+  }
+  renderAccount();
+}
+
+function showAuthGate(message = "请登录后进入你的独立 JobDeck 工作区") {
   $("#authMessage").textContent = message;
   $("#authGate").hidden = false;
-  queueMicrotask(() => $("#accessToken")?.focus());
+  const accountMode = Boolean(accountConfig?.multiUser);
+  $("#legacyAuthFields").hidden = accountMode;
+  $("#authGoLogin").hidden = !accountMode;
+  if (!accountMode) queueMicrotask(() => $("#accessToken")?.focus());
 }
 
 function hideAuthGate() {
@@ -350,6 +437,31 @@ function renderSettings() {
   setValueUnlessFocused("#settingsLocations", state.candidate.locations.join("\n"));
   setValueUnlessFocused("#salaryFloor", state.candidate.salaryFloorK);
   setValueUnlessFocused("#salaryUpper", state.candidate.salaryUpperTargetK);
+  renderAccount();
+}
+
+function renderAccount() {
+  const connection = $("#accountConnection");
+  if (!connection) return;
+  connection.textContent = accountConfig?.enabled === false
+    ? accountConfig.error || "账号服务不可用"
+    : `${accountConfig?.siteName || "OnPeople"} · 邮箱账号`;
+  $("#accountLoggedOut").hidden = Boolean(accountProfile);
+  $("#accountLoggedIn").hidden = !accountProfile;
+  if (!accountProfile) return;
+  const profile = accountProfile.user || accountProfile;
+  $("#accountIdentity").textContent = profile.email || profile.username || `用户 #${profile.id || profile.user_id || "—"}`;
+  const balance = profile.balance ?? profile.credit ?? profile.quota;
+  $("#accountBalance").textContent = balance === undefined ? "已登录" : `AI 余额：$${Number(balance).toFixed(2)}`;
+  const reward = accountConfig?.reward || {};
+  $("#starRewardCard").hidden = false;
+  $("#starRewardCard h3").textContent = reward.enabled
+    ? `Star ${reward.repository}，领取 $${reward.amount} AI 额度`
+    : "Star 奖励等待服务端启用";
+  $("#starRewardForm").hidden = !reward.enabled;
+  if (!reward.enabled) $("#starRewardCard p:not(.eyebrow)").textContent = "管理员配置 SUB2API_ADMIN_API_KEY 后即可开放一次性 $5 奖励；管理密钥不会下发到浏览器。";
+  $("#starProofStep").hidden = !starChallenge;
+  if (starChallenge) $("#starProofText").textContent = starChallenge.proof;
 }
 
 function setValueUnlessFocused(selector, value) {
@@ -682,15 +794,18 @@ $("#chatForm").addEventListener("submit", async (event) => {
   } finally { setBusy(button, false); }
 });
 
-async function streamChat(payload, onDelta, onAction = () => {}) {
+async function streamChat(payload, onDelta, onAction = () => {}, retried = false) {
   const response = await fetch("/api/chat/stream", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(accessToken ? { "X-JobDeck-Token": accessToken } : {})
+      ...(accountAccessToken ? { Authorization: `Bearer ${accountAccessToken}` } : accessToken ? { "X-JobDeck-Token": accessToken } : {})
     },
     body: JSON.stringify(payload)
   });
+  if (response.status === 401 && !retried && await refreshAccountSession()) {
+    return streamChat(payload, onDelta, onAction, true);
+  }
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
     throw new Error(data.error || `请求失败：${response.status}`);
@@ -858,6 +973,105 @@ $("#targetForm").addEventListener("submit", async (event) => {
   finally { setBusy(button, false); }
 });
 
+$("#accountLoginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#accountLoginForm button[type='submit']");
+  setBusy(button, true, "登录中…");
+  try {
+    const result = await accountApi("/api/account/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("#accountLoginEmail").value.trim(), password: $("#accountLoginPassword").value })
+    });
+    saveAccountSession(result);
+    $("#accountLoginPassword").value = "";
+    await loadAccountProfile();
+    renderAccount();
+    await refresh();
+    toast("AI 账号已登录");
+  } catch (error) { toast(error.message); }
+  finally { setBusy(button, false); }
+});
+
+$("#sendAccountCode").addEventListener("click", async (event) => {
+  const email = $("#accountRegisterEmail").value.trim();
+  if (!email) return toast("请先填写注册邮箱");
+  setBusy(event.currentTarget, true, "发送中…");
+  try {
+    await accountApi("/api/account/send-code", { method: "POST", body: JSON.stringify({ email }) });
+    toast("验证码已发送，请检查邮箱");
+  } catch (error) { toast(error.message); }
+  finally { setBusy(event.currentTarget, false); }
+});
+
+$("#accountRegisterForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#accountRegisterForm button[type='submit']");
+  const email = $("#accountRegisterEmail").value.trim();
+  const password = $("#accountRegisterPassword").value;
+  setBusy(button, true, "注册中…");
+  try {
+    const result = await accountApi("/api/account/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, verifyCode: $("#accountVerifyCode").value.trim() })
+    });
+    saveAccountSession(result);
+    if (!accountAccessToken) saveAccountSession(await accountApi("/api/account/login", { method: "POST", body: JSON.stringify({ email, password }) }));
+    $("#accountRegisterPassword").value = "";
+    $("#accountVerifyCode").value = "";
+    await loadAccountProfile();
+    renderAccount();
+    await refresh();
+    toast("注册成功，AI 账号已登录");
+  } catch (error) { toast(error.message); }
+  finally { setBusy(button, false); }
+});
+
+$("#accountLogout").addEventListener("click", async (event) => {
+  setBusy(event.currentTarget, true, "退出中…");
+  try {
+    await accountApi("/api/account/logout", { method: "POST", body: JSON.stringify({ refreshToken: accountRefreshToken }) });
+  } catch { /* 本地会话仍需立即清除。 */ }
+  clearAccountSession();
+  if (accountConfig?.multiUser) {
+    window.location.reload();
+    return;
+  }
+  renderAccount();
+  setBusy(event.currentTarget, false);
+  toast("AI 账号已退出");
+});
+
+$("#createStarChallenge").addEventListener("click", async (event) => {
+  const username = $("#rewardGithubUsername").value.trim();
+  if (!username) return toast("请填写 GitHub 用户名");
+  setBusy(event.currentTarget, true, "验证账号…");
+  try {
+    starChallenge = await accountApi("/api/rewards/github-star/challenge", { method: "POST", body: JSON.stringify({ username }) });
+    renderAccount();
+    await navigator.clipboard.writeText(starChallenge.proof).catch(() => {});
+    toast("一次性证明已生成并复制");
+  } catch (error) { toast(error.message); }
+  finally { setBusy(event.currentTarget, false); }
+});
+
+$("#claimStarReward").addEventListener("click", async (event) => {
+  if (!starChallenge) return toast("请先生成领取证明");
+  const gistUrl = $("#rewardGistUrl").value.trim();
+  if (!gistUrl) return toast("请填写公开 Gist 链接");
+  setBusy(event.currentTarget, true, "正在核验…");
+  try {
+    const result = await accountApi("/api/rewards/github-star/claim", {
+      method: "POST",
+      body: JSON.stringify({ challengeId: starChallenge.challengeId, gistUrl })
+    });
+    starChallenge = undefined;
+    await loadAccountProfile();
+    renderAccount();
+    toast(`已发放 $${result.amount} AI 额度`);
+  } catch (error) { toast(error.message); }
+  finally { setBusy(event.currentTarget, false); }
+});
+
 $("#authForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const candidate = $("#accessToken").value.trim();
@@ -873,5 +1087,20 @@ $("#authForm").addEventListener("submit", async (event) => {
   }
 });
 
-refresh();
-setInterval(refresh, 2500);
+$("#authGoLogin").addEventListener("click", () => {
+  hideAuthGate();
+  go("settings");
+  queueMicrotask(() => $("#accountLoginEmail")?.focus());
+});
+
+$("#copyExtensionToken").addEventListener("click", async () => {
+  const token = state?.pairingToken;
+  if (!token) return toast("工作区尚未加载，请稍后重试");
+  await navigator.clipboard.writeText(token);
+  toast("插件连接码已复制，请粘贴到扩展设置中");
+});
+
+initializeAccount().then(refresh);
+setInterval(() => {
+  if (!accountConfig?.multiUser || accountAccessToken) refresh();
+}, 2500);

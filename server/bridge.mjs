@@ -79,6 +79,10 @@ export class BrowserBridge {
     });
   }
 
+  acceptUpgrade(req, socket, head) {
+    this.wss.handleUpgrade(req, socket, head, (ws) => this.connect(ws));
+  }
+
   connect(ws) {
     this.extension?.close(4000, "新的 Chrome 连接已建立");
     this.extension = ws;

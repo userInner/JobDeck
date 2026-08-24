@@ -63,7 +63,7 @@ npm start
 ```text
 Web 工作台：https://你的域名
 执行通道：wss://你的域名/extension
-访问令牌：服务器中的 JOBDECK_ACCESS_TOKEN
+插件连接码：登录工作台后，在“设置 → 当前账号”中复制
 ```
 
 扩展通过 Chrome 的 `debugger` 权限调用输入协议。执行期间页面会显示 JobDeck 光标，Chrome 也会显示调试提示；任务暂停或单步完成后会释放控制。
@@ -75,6 +75,8 @@ Web 工作台：https://你的域名
 1. 候选人事实：求职状态、目标岗位、期望城市、薪资边界、已核实经历与技术证据。
 2. 本地简历：自行选择 PDF 或填写简历正文。个人附件默认不会进入 Git 仓库。
 3. 模型连接：填写 OpenAI Responses 或 OpenAI-compatible Chat 接口、模型名称和 API Key。
+
+设置页还可以直接使用邮箱注册或登录 OnPeople AI 账号。该流程不依赖 Google、GitHub 或其他 OAuth；密码只经由 JobDeck 服务即时转发给账号服务，不会写入 JobDeck 数据文件，登录令牌只保留在当前浏览器会话中。
 
 默认接口地址是 `https://api.openai.com/v1`。也可以使用自建或兼容服务，但远程地址必须使用 HTTPS。
 
@@ -96,11 +98,7 @@ cd JobDeck
 cp .env.example .env
 ```
 
-编辑 `.env`，把域名改成已经解析到服务器的域名，并生成访问令牌：
-
-```bash
-openssl rand -hex 32
-```
+编辑 `.env`，把域名改成已经解析到服务器的域名，并保留 `JOBDECK_MULTI_USER=true`。公网工作台使用 Sub2API 邮箱账号登录，不再共用一个部署访问令牌。
 
 然后启动：
 
@@ -110,11 +108,37 @@ docker compose --env-file .env -f deploy/compose.https.yaml up -d --build
 
 服务器需要开放 TCP 80、TCP 443 和 UDP 443。运行数据保存在 Docker 的 `jobdeck_data` 卷中；更新代码后重新执行上述启动命令即可。建议同时备份该卷，并妥善保存 `.env`。
 
+### 启用 GitHub Star 奖励
+
+在 `.env` 中配置 Sub2API 管理密钥后，可以给已验证 Star 的 AI 账号一次性发放额度：
+
+```text
+SUB2API_BASE_URL=https://sub2api.aibro.vip
+SUB2API_ADMIN_API_KEY=你的服务端管理密钥
+GITHUB_REPOSITORY=userInner/JobDeck
+STAR_REWARD_USD=5
+GITHUB_TOKEN=可选的服务端 GitHub Token
+```
+
+领取者先登录 AI 账号，再生成一次性证明并放入公开 Gist。JobDeck 会核对 Gist 所有者、公开 Star、AI 账号和历史奖励流水，全部通过后调用 Sub2API 管理接口加 $5。每个 GitHub 账号和 AI 账号只能领取一次；稳定的幂等编号可防止网络重试导致重复加款。`SUB2API_ADMIN_API_KEY` 和可选的 `GITHUB_TOKEN` 仅保存在服务器环境中，绝不会返回给 Web 页面。
+
+相关接口：
+
+```text
+GET  /api/account/config
+POST /api/account/send-code
+POST /api/account/register
+POST /api/account/login
+GET  /api/account/me
+POST /api/rewards/github-star/challenge
+POST /api/rewards/github-star/claim
+```
+
 安全约束：
 
-- 只要服务监听非回环地址，`JOBDECK_ACCESS_TOKEN` 就是必填项，且至少 24 个字符。
-- 除健康检查外，所有 API 都需要访问令牌；Web 工作台会在首次进入时要求解锁。
-- 扩展与服务端通过 WSS 连接，令牌放在 WebSocket 子协议中，不放在页面 URL。
+- 多用户模式下，工作台数据 API 必须携带有效的 Sub2API Access Token；每个 `user_id` 映射到独立的状态、模型密钥、岗位、Agent 和浏览器桥接空间。
+- 每个账号生成独立插件连接码。扩展与服务端通过 WSS 连接，连接码放在 WebSocket 子协议中，不放在页面 URL。
+- 单个 Chrome 插件连接只能进入连接码所属账号的空间，不能读取其他用户数据或占用其他用户的浏览器会话。
 - 不要把 `.env`、模型 API Key、简历或求职数据提交到 GitHub。
 
 如果已经有 Nginx、Traefik 或 Cloudflare Tunnel，也可以只运行 Dockerfile 中的 JobDeck 服务并自行反向代理 `43120`；反向代理必须支持 WebSocket Upgrade。
@@ -146,7 +170,10 @@ docker compose --env-file .env -f deploy/compose.https.yaml up -d --build
 ```text
 ~/.jobdeck-local/state.json
 ~/.jobdeck-local/secrets.json
+~/.jobdeck-local/star-rewards.json
 ```
+
+公网多用户模式下，每个账号的数据位于 `/data/tenants/tenant-<user_id 哈希>/`，目录内分别保存 `state.json` 与 `secrets.json`；原始用户编号只记录在受保护的租户元数据中。Star 奖励流水位于实例级 `/data/star-rewards.json`，用于阻止跨账号重复领取。当前部署方案面向单个 JobDeck 服务副本；横向扩容前需要把租户索引和奖励流水迁移到共享数据库。
 
 删除该目录会清空本地状态。工作台支持导出不含密钥的数据。
 

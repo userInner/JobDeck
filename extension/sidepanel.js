@@ -130,7 +130,7 @@ $("#pair").addEventListener("click", async () => {
     render(next);
     showToast("已连接 JobDeck 工作台");
   } catch {
-    showToast("本机未启动时，请在设置中填写远程地址与访问令牌");
+    showToast("远程使用时，请在设置中填写工作台地址与账号专属插件连接码");
   }
 });
 

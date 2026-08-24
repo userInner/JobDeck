@@ -16,14 +16,15 @@ function compactToolData(value) {
 }
 
 export class GoalAgentRuntime {
-  constructor({ store, ai, tools, observe, waitStatus }) {
+  constructor({ store, ai, tools, observe, waitStatus, runInContext = (callback) => callback() }) {
     this.store = store;
     this.ai = ai;
     this.tools = new Map(tools.map((tool) => [tool.name, tool]));
     this.observe = observe;
     this.waitStatus = waitStatus;
+    this.runInContext = runInContext;
     this.running = new Set();
-    this.timer = setInterval(() => this.tickWaiting(), 3000);
+    this.timer = setInterval(() => this.runInContext(() => this.tickWaiting()), 3000);
     this.timer.unref?.();
   }
 

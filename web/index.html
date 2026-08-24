@@ -10,11 +10,14 @@
   <body>
     <section id="authGate" class="auth-gate" aria-labelledby="authTitle" hidden>
       <form id="authForm" class="auth-card">
-        <p class="eyebrow">SECURE REMOTE ACCESS</p>
-        <h1 id="authTitle">解锁 JobDeck 工作台</h1>
-        <p id="authMessage">输入服务器部署时设置的访问令牌。令牌只保留在当前标签页会话中。</p>
-        <label><span>访问令牌</span><input id="accessToken" type="password" autocomplete="current-password" required /></label>
-        <button class="primary" type="submit">验证并进入</button>
+        <p class="eyebrow">SECURE WORKSPACE</p>
+        <h1 id="authTitle">登录 JobDeck 工作台</h1>
+        <p id="authMessage">登录后进入你的独立求职工作区。</p>
+        <div id="legacyAuthFields">
+          <label><span>访问令牌</span><input id="accessToken" type="password" autocomplete="current-password" /></label>
+          <button class="primary" type="submit">验证并进入</button>
+        </div>
+        <button id="authGoLogin" class="primary" type="button" hidden>前往登录 / 注册</button>
       </form>
     </section>
     <div class="app-shell">
@@ -180,6 +183,43 @@
 
         <section id="view-settings" class="view">
           <div class="settings-grid">
+            <section class="panel settings-panel account-panel">
+              <div class="panel-head"><div><p class="eyebrow">JOBDECK ACCOUNT</p><h2>工作区账号与 Star 奖励</h2></div><span id="accountConnection" class="muted">正在连接账号服务</span></div>
+              <div id="accountLoggedOut" class="account-body">
+                <div class="account-columns">
+                  <form id="accountLoginForm" class="settings-form compact-form">
+                    <h3 class="full">登录</h3>
+                    <label class="full"><span>邮箱</span><input id="accountLoginEmail" type="email" autocomplete="email" required /></label>
+                    <label class="full"><span>密码</span><input id="accountLoginPassword" type="password" autocomplete="current-password" minlength="6" required /></label>
+                    <div class="full"><button class="primary" type="submit">登录 AI 账号</button></div>
+                  </form>
+                  <form id="accountRegisterForm" class="settings-form compact-form">
+                    <h3 class="full">注册</h3>
+                    <label class="full"><span>邮箱</span><input id="accountRegisterEmail" type="email" autocomplete="email" required /></label>
+                    <label class="full"><span>邮箱验证码</span><div class="inline-control"><input id="accountVerifyCode" inputmode="numeric" autocomplete="one-time-code" required /><button id="sendAccountCode" type="button">发送验证码</button></div></label>
+                    <label class="full"><span>密码（至少 6 位）</span><input id="accountRegisterPassword" type="password" autocomplete="new-password" minlength="6" required /></label>
+                    <div class="full"><button class="primary" type="submit">注册并登录</button></div>
+                  </form>
+                </div>
+              </div>
+              <div id="accountLoggedIn" class="account-body" hidden>
+                <div class="account-summary"><div><small>当前 AI 账号</small><strong id="accountIdentity">—</strong><span id="accountBalance">—</span></div><div class="button-row"><button id="copyExtensionToken" type="button">复制插件连接码</button><button id="accountLogout" type="button">退出登录</button></div></div>
+                <section id="starRewardCard" class="star-reward-card">
+                  <div><p class="eyebrow">GITHUB STAR REWARD</p><h3>Star JobDeck，领取 $5 AI 额度</h3><p>无需 GitHub OAuth。用公开 Gist 的一次性文本证明 GitHub 账号归属，验证 Star 后奖励只发放一次。</p></div>
+                  <div id="starRewardForm" class="reward-controls">
+                    <label><span>GitHub 用户名</span><input id="rewardGithubUsername" autocomplete="off" /></label>
+                    <button id="createStarChallenge" class="primary" type="button">生成领取证明</button>
+                  </div>
+                  <div id="starProofStep" class="proof-step" hidden>
+                    <p>新建一个<strong>公开 Gist</strong>，文件名为 <code>jobdeck-star-proof.txt</code>，内容必须完整复制下面的一次性证明：</p>
+                    <pre id="starProofText"></pre>
+                    <a id="openGist" href="https://gist.github.com/" target="_blank" rel="noreferrer">打开 GitHub Gist</a>
+                    <label><span>公开 Gist 链接</span><input id="rewardGistUrl" type="url" placeholder="https://gist.github.com/..." /></label>
+                    <button id="claimStarReward" class="primary" type="button">验证并领取 $5</button>
+                  </div>
+                </section>
+              </div>
+            </section>
             <section class="panel settings-panel">
               <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span class="muted">密钥仅保存在你的 JobDeck 服务</span></div>
               <form id="providerForm" class="settings-form">
