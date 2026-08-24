@@ -141,7 +141,13 @@ POST /api/rewards/github-star/claim
 - 单个 Chrome 插件连接只能进入连接码所属账号的空间，不能读取其他用户数据或占用其他用户的浏览器会话。
 - 不要把 `.env`、模型 API Key、简历或求职数据提交到 GitHub。
 
-如果已经有 Nginx、Traefik 或 Cloudflare Tunnel，也可以只运行 Dockerfile 中的 JobDeck 服务并自行反向代理 `43120`；反向代理必须支持 WebSocket Upgrade。
+如果已经有 1Panel、OpenResty、Nginx、Traefik 或 Cloudflare Tunnel，可以使用不会占用公网 80/443 的配置：
+
+```bash
+docker compose --env-file .env -f deploy/compose.existing-proxy.yaml up -d --build
+```
+
+该配置只监听 `127.0.0.1:43120`。请让现有 HTTPS 反向代理把整个站点转发到 `http://127.0.0.1:43120`，并确保支持 WebSocket Upgrade。
 
 ## BOSS 直聘适配
 

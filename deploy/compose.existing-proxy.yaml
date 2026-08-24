@@ -1,0 +1,35 @@
+name: jobdeck
+
+services:
+  jobdeck:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      JOBDECK_HOST: 0.0.0.0
+      JOBDECK_PORT: 43120
+      JOBDECK_DATA_DIR: /data
+      JOBDECK_REMOTE_MODE: "true"
+      JOBDECK_MULTI_USER: ${JOBDECK_MULTI_USER:-true}
+      SUB2API_BASE_URL: ${SUB2API_BASE_URL:-https://sub2api.aibro.vip}
+      SUB2API_ADMIN_API_KEY: ${SUB2API_ADMIN_API_KEY:-}
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-userInner/JobDeck}
+      STAR_REWARD_USD: ${STAR_REWARD_USD:-5}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ports:
+      - "127.0.0.1:${JOBDECK_BIND_PORT:-43120}:43120"
+    volumes:
+      - jobdeck_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  jobdeck_data:
