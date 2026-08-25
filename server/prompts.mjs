@@ -113,8 +113,14 @@ export function jobAnalysisPrompt(job, candidate) {
   "strengths": ["最多3条"],
   "gaps": ["最多3条"],
   "summary": "80字以内",
+  "businessDomain": "从 JD 提取的具体业务领域；没有明确垂直场景时留空",
+  "needsDomainBridge": true | false,
   "greeting": "90到150字的单段定制招呼；即使判断为跳过也生成一条真实、克制的版本，供用户最终决定"
 }
+
+领域判断规则：
+- 仅当 JD 有明确垂直业务、且候选人的已核实证据没有该行业正式经历时，needsDomainBridge 才为 true。
+- businessDomain 必须来自 JD 可直接支持的具体场景，例如“法律 AI”“医疗 AI”“金融风控”；不得根据公司名称或常识猜测。没有明确领域时留空并设为 false。
 
 ${recruiterGreetingRules()}
 
@@ -144,6 +150,8 @@ export function jobCompatibilityPrompt(job, candidate) {
   "matchedStack": ["最多5个与 JD 直接对应的真实技术点"],
   "hardGaps": ["最多3个明确硬性缺口"],
   "summary": "80字以内的匹配判断",
+  "businessDomain": "从 JD 提取的具体业务领域；没有明确垂直场景时留空",
+  "needsDomainBridge": true | false,
   "greeting": "90到150字、针对该 JD 的单段独立招呼语；不匹配时留空"
 }
 
@@ -152,6 +160,7 @@ export function jobCompatibilityPrompt(job, candidate) {
 - 不要仅因正式任职时间短就否定匹配；可以使用候选人档案中已核实的独立项目和开源贡献作为工程证据，但不能写成正式工作。
 - 岗位和城市已经由用户在 BOSS 求职期望中确定，不得再使用 JobDeck 的旧目标岗位、旧城市或旧薪资配置进行筛选。
 - 薪资或地点不得作为拒绝依据；仅在岗位要求纯算法博士、明确多年硬性经验、或核心技术方向明显不相干时判为不匹配。
+- 仅当 JD 有明确垂直业务、且候选人的已核实证据没有该行业正式经历时，needsDomainBridge 才为 true；businessDomain 必须来自 JD 原文可支持的具体场景，不得猜测。没有明确领域时留空并设为 false。
 - 招呼语必须引用该岗位真实要求与候选人的对应证据，不得批量复用模板，不得虚构经历。
 
 ${recruiterGreetingRules()}
@@ -174,6 +183,7 @@ export function recruiterGreetingRules() {
 - 正式经历用“正式工作中”，OnPeople 用“独立开发”，Cherry Studio 用“开源贡献”，不得混淆身份。
 - 当候选人已核实事实确实包含相关信息时：Agent Runtime、桌面 Agent、工具调用或开发效率类岗位优先使用“独立开发基于 OpenAI Codex App Server 的 OnPeople Agent 工作台”；重视开源协作的岗位可使用经实时核验的 Cherry Studio “GitHub 5 万+ Star、前 30 贡献者”证据。不要把这些事实套用给其他候选人。
 - 跨行业岗位且候选人没有对应行业正式经历时，必须从 JD 提取具体业务领域，并用一句迁移桥接收束，例如“这些工程经验可以迁移到法律 AI 产品建设，方便进一步沟通吗？”。“法律”应按真实 JD 替换为法务、医疗、金融等明确场景；JD 没有清晰行业场景时不要强行添加，也不得暗示候选人已有该行业经验。
+- 当匹配结论中 needsDomainBridge 为 true 时，迁移句必须原样包含 businessDomain，并使用“可迁移到”“应用到”或“应用于”之一，确保系统可以验证，而不是改写成行业同义词。
 - 结尾使用自然、低压力的行动邀请，例如“如果方向合适，方便进一步沟通吗？”，不要索要隐私或擅自承诺面试时间。
 - 禁止“老板你好”“非常想加入你们”“可以看下我的简历，期待回复”等平台默认话术；禁止夸赞公司、空泛自评和连续堆砌技术名词。
 - 不复述薪资和城市；不声称拥有候选人档案中没有的行业经验。若只有迁移能力，直接说明相关工程经验可迁移到从 JD 识别出的具体业务领域。`;

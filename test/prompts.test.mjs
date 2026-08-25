@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AIService } from "../server/ai.mjs";
 import { jobCompatibilityPrompt, recruiterGreetingPrompt, resumeOptimizationPrompt } from "../server/prompts.mjs";
 import { normalizeRecruiterGreeting, recruiterGreetingIssues } from "../server/greeting.mjs";
 
@@ -42,6 +43,9 @@ test("bulk compatibility mode uses a binary decision without score thresholds", 
   assert.match(prompt, /第一句必须点出这个 JD 独有的业务场景/);
   assert.match(prompt, /正式经历用“正式工作中”/);
   assert.match(prompt, /不要罗列完整技术栈/);
+  assert.match(prompt, /"businessDomain"/);
+  assert.match(prompt, /"needsDomainBridge"/);
+  assert.match(prompt, /不得根据公司名称或常识猜测|不得猜测/);
 });
 
 test("recruiter greeting rules reject generic BOSS copy and normalize visible noise", () => {
@@ -52,7 +56,132 @@ test("recruiter greeting rules reject generic BOSS copy and normalize visible no
 
 test("a concise JD-specific greeting passes the local quality gate", () => {
   const greeting = "您好，看到岗位重点是将合同审查与知识库能力落到企业法务流程。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批；这些工程经验可迁移到法务 AI 产品建设。如果方向合适，方便进一步沟通吗？";
-  assert.deepEqual(recruiterGreetingIssues(greeting, { matchedStack: ["Go", "MCP"] }), []);
+  assert.deepEqual(recruiterGreetingIssues(greeting, {
+    matchedStack: ["Go", "MCP"],
+    businessDomain: "法务 AI",
+    needsDomainBridge: true
+  }), []);
+});
+
+test("cross-industry greeting quality gate requires the extracted JD domain bridge", () => {
+  const analysis = {
+    matchedStack: ["Go", "MCP"],
+    businessDomain: "法律 AI",
+    needsDomainBridge: true
+  };
+  const missingBridge = "您好，看到岗位重点是合同审查与企业知识库。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批。如果方向合适，方便进一步沟通吗？";
+  assert.ok(recruiterGreetingIssues(missingBridge, analysis).some((issue) => issue.includes("跨行业业务迁移桥接")));
+
+  const withBridge = "您好，看到岗位重点是合同审查与企业知识库。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批；这些工程经验可以迁移到法律 AI 产品建设。如果方向合适，方便进一步沟通吗？";
+  assert.ok(!recruiterGreetingIssues(withBridge, analysis).some((issue) => issue.includes("跨行业业务迁移桥接")));
+
+  assert.ok(!recruiterGreetingIssues(missingBridge, {
+    ...analysis,
+    needsDomainBridge: false
+  }).some((issue) => issue.includes("跨行业业务迁移桥接")));
+});
+
+test("job compatibility preserves the extracted domain bridge decision for the quality gate", async () => {
+  const service = new AIService({
+    state: {
+      provider: { mode: "responses", model: "test-model" },
+      candidate: { facts: ["正式工作使用 Go", "独立开发 OnPeople"] }
+    },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          matches: true,
+          matchedRole: "法律 AI 全栈工程师",
+          matchedStack: ["Go", "MCP"],
+          hardGaps: ["无法律行业正式经历"],
+          summary: "工程能力可迁移到法律 AI 产品",
+          businessDomain: "法律 AI",
+          needsDomainBridge: true,
+          greeting: "您好，看到岗位重点是合同审查与企业知识库。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批；这些工程经验可以迁移到法律 AI 产品建设。如果方向合适，方便进一步沟通吗？"
+        })
+      })
+    }
+  });
+
+  const analysis = await service.matchJob({
+    title: "法律 AI 全栈工程师",
+    company: "示例公司",
+    description: "负责合同审查与法律知识库"
+  });
+  assert.equal(analysis.businessDomain, "法律 AI");
+  assert.equal(analysis.needsDomainBridge, true);
+  assert.deepEqual(recruiterGreetingIssues(analysis.greeting, analysis), []);
+});
+
+test("scored job analysis also preserves the extracted domain bridge decision", async () => {
+  const service = new AIService({
+    state: {
+      provider: { mode: "responses", model: "test-model" },
+      candidate: { facts: ["正式工作使用 Go", "独立开发 OnPeople"] }
+    },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          score: 82,
+          verdict: "推荐",
+          dimensions: { roleFit: 85, experience: 72, stack: 88, location: 100, compensation: 80 },
+          strengths: ["Go 与 Agent 工程能力"],
+          gaps: ["无法律行业正式经历"],
+          summary: "工程能力可迁移到法律 AI 产品",
+          businessDomain: "法律 AI",
+          needsDomainBridge: true,
+          greeting: "您好，看到岗位重点是合同审查与企业知识库。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批；这些工程经验可以迁移到法律 AI 产品建设。如果方向合适，方便进一步沟通吗？"
+        })
+      })
+    }
+  });
+  const analysis = await service.analyzeJob({
+    title: "法律 AI 全栈工程师",
+    company: "示例公司",
+    description: "负责合同审查与法律知识库"
+  });
+  assert.equal(analysis.businessDomain, "法律 AI");
+  assert.equal(analysis.needsDomainBridge, true);
+});
+
+test("a failed greeting rewrite cannot bypass the cross-industry quality gate", async () => {
+  const service = new AIService({
+    state: { candidate: { facts: ["正式工作使用 Go", "独立开发 OnPeople"] } }
+  });
+  service.structured = async () => ({
+    greeting: "您好，看到岗位重点是合同审查与企业知识库。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批。如果方向合适，方便进一步沟通吗？"
+  });
+  const analysis = {
+    matchedStack: ["Go", "MCP"],
+    businessDomain: "法律 AI",
+    needsDomainBridge: true,
+    greeting: "老板你好，可以看下我的简历，期待回复"
+  };
+  await assert.rejects(
+    service.ensureRecruiterGreeting({ title: "法律 AI 全栈工程师" }, analysis),
+    /缺少“法律 AI”跨行业业务迁移桥接/
+  );
+});
+
+test("a compliant second greeting rewrite passes the cross-industry quality gate", async () => {
+  const service = new AIService({
+    state: { candidate: { facts: ["正式工作使用 Go", "独立开发 OnPeople"] } }
+  });
+  const refined = "您好，看到岗位重点是合同审查与企业知识库。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批；这些工程经验可以迁移到法律 AI 产品建设。如果方向合适，方便进一步沟通吗？";
+  service.structured = async () => ({ greeting: refined });
+  const result = await service.ensureRecruiterGreeting({ title: "法律 AI 全栈工程师" }, {
+    matchedStack: ["Go", "MCP"],
+    businessDomain: "法律 AI",
+    needsDomainBridge: true,
+    greeting: "老板你好，可以看下我的简历，期待回复"
+  });
+  assert.equal(result, refined);
 });
 
 test("greeting rewrite prompt carries the JD, evidence boundary and failed-quality reason", () => {

@@ -33,6 +33,13 @@ export function recruiterGreetingIssues(value, analysis = {}) {
   if (DEFAULT_PHRASES.some((pattern) => pattern.test(greeting))) issues.push("包含平台默认或空泛话术");
   if (!/方便.*沟通|可以.*聊|愿意.*沟通|期待.*交流/.test(greeting)) issues.push("缺少自然的下一步沟通邀请");
 
+  const businessDomain = String(analysis?.businessDomain || "").trim();
+  if (analysis?.needsDomainBridge === true && businessDomain) {
+    const hasDomain = greeting.toLowerCase().includes(businessDomain.toLowerCase());
+    const hasMigration = /可迁移|迁移到|应用到|应用于|用于.{0,12}建设|支撑.{0,12}建设/.test(greeting);
+    if (!hasDomain || !hasMigration) issues.push(`缺少“${businessDomain}”跨行业业务迁移桥接`);
+  }
+
   const matchedTerms = Array.isArray(analysis?.matchedStack) ? analysis.matchedStack.map(String) : [];
   const evidenceTerms = [...new Set([...matchedTerms, ...VERIFIED_EVIDENCE_TERMS])]
     .filter((term) => term.length > 1 && greeting.toLowerCase().includes(term.toLowerCase()));
