@@ -130,8 +130,16 @@ test("automatic job search is progress-driven until the requested verified-conta
   assert.match(workflow, /candidateMatchesExpectedLocation\(candidate, activeLocation\)/);
   assert.match(workflow, /candidateMatchesExpectedLocation\(job, activeLocation\)/);
   assert.match(workflow, /await verifyAutopilotProvider\(runId\)/);
+  assert.match(workflow, /await ensureAutopilotCandidateEvidence\(runId\)/);
   assert.match(source, /正在验证 Sub2API 模型与账号分组/);
   assert.match(source, /API Key is not assigned to any group/);
+});
+
+test("automatic job search explains whether it actually enters the contact-click branch", () => {
+  assert.match(source, /未进入“立即沟通”点击/);
+  assert.match(source, /鼠标正在移向/);
+  assert.match(source, /已点击“/);
+  assert.match(source, /未点击立即沟通：/);
 });
 
 test("saved BOSS expectations are selected directly without a second city workflow", () => {

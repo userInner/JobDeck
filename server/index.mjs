@@ -7,6 +7,7 @@ import { GoalAgentRuntime } from "./agent-runtime.mjs";
 import { AIService } from "./ai.mjs";
 import { findPageControl, rankAnalyzedJobs, verificationReason } from "./autopilot.mjs";
 import { CONTROLLED } from "./bridge.mjs";
+import { bossResumeEvidence, hasCandidateEvidence } from "./candidate-evidence.mjs";
 import { DEFAULT_HOST, DEFAULT_PORT } from "./defaults.mjs";
 import { inferCompanyName, jobCandidatesFromPage, jobFromPage, mergeJobInput } from "./jobs.mjs";
 import { buildResumeWritePlan } from "./resume-plan.mjs";
@@ -206,6 +207,17 @@ function failWorkflow(error) {
   throw error;
 }
 
+function persistBossResumeEvidence(page) {
+  const resumeText = bossResumeEvidence(page);
+  if (resumeText.length < 300) {
+    throw new Error("BOSS 在线简历没有读取到足够的工作、项目或技能内容，无法据此判断岗位匹配");
+  }
+  store.update((state) => {
+    state.candidate.resumeText = resumeText;
+  });
+  return resumeText;
+}
+
 function resumeAuditActive(runId) {
   const workflow = store.state.workflow;
   return workflow.resumeAuditRunId === runId && workflow.resumeAuditStatus === "running";
@@ -233,6 +245,7 @@ async function waitForBossResume(runId, tabId, attempts = 20) {
 async function runAutomaticResumeAudit(runId, tabId) {
   try {
     const page = await waitForBossResume(runId, tabId);
+    persistBossResumeEvidence(page);
     setWorkflow({ resumeAuditMessage: "在线简历已读取，正在进行 AI 审查…" });
     const audit = await ai.auditBossResume({ ...page.boss?.resume, text: page.text });
     if (!resumeAuditActive(runId)) return;
@@ -281,6 +294,7 @@ async function runResumeOptimization(runId, tabId) {
     if (page.adapter !== "boss-zhipin" || page.pageType !== "resume") {
       throw new Error("BOSS 在线简历标签已经失效，请重新打开简历后再生成优化稿");
     }
+    persistBossResumeEvidence(page);
     setWorkflow({ resumeOptimizationMessage: "在线简历已读取，AI 正在生成字段级替换稿…" });
     const optimization = await ai.optimizeBossResume({ ...page.boss?.resume, text: page.text }, store.state.workflow.resumeAudit);
     if (!resumeOptimizationActive(runId)) return;
@@ -307,6 +321,7 @@ async function runResumeOptimization(runId, tabId) {
 async function runAutomaticResumeRewrite(runId, tabId) {
   try {
     const page = await waitForBossResume(runId, tabId);
+    persistBossResumeEvidence(page);
     setWorkflow({ resumeAuditMessage: "在线简历已读取，正在进行 AI 审查…" });
     const audit = await ai.auditBossResume({ ...page.boss?.resume, text: page.text });
     if (!resumeAuditActive(runId)) return;
@@ -1436,9 +1451,11 @@ async function applyCurrentBossJob(runId, tabId, job) {
   const contact = findPageControl(page, /^(?:立即沟通|继续沟通|立即申请|投递简历|申请职位)$/i);
   if (!contact) throw new Error(`${job.company} / ${job.title}：未找到明确的沟通或投递按钮`);
   const contactPoint = centerOf(contact, "沟通或投递按钮");
+  setAutopilot({ message: `目标 ${store.state.workflow.autopilot.sent}/${store.state.workflow.autopilot.targetApplications}；鼠标正在移向“${contact.label || "立即沟通"}”` });
   await bridge.execute({ kind: "computerMove", tabId, x: contactPoint.x, y: contactPoint.y, reason: `已批准批次：移动到 ${job.company} 的沟通按钮` });
   await sleep(180);
   await bridge.execute({ kind: "computerClick", tabId, x: contactPoint.x, y: contactPoint.y, reason: `已批准批次：联系 ${job.company} 的 ${job.title}` });
+  setAutopilot({ message: `已点击“${contact.label || "立即沟通"}”，正在验证 BOSS 会话与定制消息输入框` });
   await sleep(500);
   const transition = await adaptiveBossComposer(runId, tabId, job);
   tabId = transition.tabId;
@@ -1606,9 +1623,33 @@ function candidateMatchesExpectedLocation(candidate, activeLocation = "") {
     : haystack.includes(location));
 }
 
+async function ensureAutopilotCandidateEvidence(runId) {
+  if (hasCandidateEvidence(store.state.candidate)) return;
+  setAutopilot({
+    stage: "resume-evidence",
+    status: "running-search",
+    message: "候选人技术证据尚未同步，正在自动读取 BOSS 在线简历"
+  });
+  store.addActivity("自动找工作：候选人技术证据为空，先读取 BOSS 在线简历");
+  const tab = await bridge.execute({ kind: "openBossResume" });
+  const page = await waitForBossPage(
+    runId,
+    (value) => value?.adapter === "boss-zhipin"
+      && value?.pageType === "resume"
+      && ((value?.boss?.resume?.sections || []).length > 0 || String(value?.text || "").length > 600),
+    "BOSS 在线简历",
+    20,
+    tab.id
+  );
+  const resumeText = persistBossResumeEvidence(page);
+  store.addActivity(`自动找工作：已从 BOSS 在线简历同步 ${resumeText.length} 字真实技术证据`);
+  setAutopilot({ message: "BOSS 在线简历证据已同步，准备进入职位列表" });
+}
+
 async function runAutomaticJobSearch(runId, targetApplications) {
   try {
     await verifyAutopilotProvider(runId);
+    await ensureAutopilotCandidateEvidence(runId);
     const initialTab = await bridge.execute({ kind: "openBossJobs" });
     let tabId = initialTab.id;
     let initialPage = await waitForBossList(runId, tabId, "BOSS 职位列表", 20);
@@ -1689,7 +1730,7 @@ async function runAutomaticJobSearch(runId, targetApplications) {
               inspectedCount += 1;
               setAutopilot({
                 analyzed: inspectedCount,
-                message: `${job.company} / ${job.title}：${analysis.matches ? "技术与岗位匹配，准备沟通" : `存在明确硬性冲突，跳过：${analysis.summary || analysis.hardGaps?.join("、") || "岗位方向不符"}`}`
+                message: `${job.company} / ${job.title}：${analysis.matches ? "技术与岗位匹配，下一步将点击立即沟通" : `未进入“立即沟通”点击：${analysis.summary || analysis.hardGaps?.join("、") || "岗位方向不符"}`}`
               });
               if (analysis.matches === true && job.greeting) {
                 applicationAttempted = true;
@@ -1699,6 +1740,8 @@ async function runAutomaticJobSearch(runId, targetApplications) {
                 page = application.page;
                 tabId = application.tabId;
                 setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已完成 ${store.state.workflow.autopilot.sent}/${targetApplications}，继续寻找匹配岗位` });
+              } else {
+                store.addActivity(`未点击立即沟通：${job.company} / ${job.title}（${analysis.summary || analysis.hardGaps?.join("、") || "岗位存在明确硬性冲突"}）`, "done");
               }
             }
           } catch (error) {
