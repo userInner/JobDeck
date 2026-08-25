@@ -21,6 +21,26 @@ export class AIService {
     return new OpenAI({ apiKey, baseURL: provider.baseURL || undefined });
   }
 
+  async verifyProvider() {
+    const provider = this.store.state.provider;
+    const client = this.client();
+    if (provider.mode === "compatible-chat") {
+      await client.chat.completions.create({
+        model: provider.model,
+        messages: [{ role: "user", content: "Reply OK." }],
+        max_tokens: 8
+      });
+      return true;
+    }
+    await client.responses.create({
+      model: provider.model,
+      input: "Reply OK.",
+      max_output_tokens: 16,
+      store: false
+    });
+    return true;
+  }
+
   async structured(prompt, errorMessage = "模型没有返回可解析的结构化结果") {
     const provider = this.store.state.provider;
     const client = this.client();

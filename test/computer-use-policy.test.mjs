@@ -107,6 +107,9 @@ test("automatic job search is progress-driven until the requested verified-conta
   assert.doesNotMatch(workflow, /\.slice\(0, 6\)/);
   assert.match(workflow, /candidateMatchesExpectedLocation\(candidate, activeLocation\)/);
   assert.match(workflow, /candidateMatchesExpectedLocation\(job, activeLocation\)/);
+  assert.match(workflow, /await verifyAutopilotProvider\(runId\)/);
+  assert.match(source, /正在验证 Sub2API 模型与账号分组/);
+  assert.match(source, /API Key is not assigned to any group/);
 });
 
 test("saved BOSS expectations require the visible city filter to actually change", () => {

@@ -107,12 +107,24 @@ export class Sub2APIClient {
     return this.request(`/api/v1/keys?${query}`, { token: accessToken });
   }
 
-  createAPIKey(accessToken, { name = "JobDeck", idempotencyKey } = {}) {
+  listAvailableGroups(accessToken) {
+    return this.request("/api/v1/groups/available", { token: accessToken });
+  }
+
+  selectGatewayGroup(groups) {
+    const available = (Array.isArray(groups) ? groups : [])
+      .filter((group) => group?.status === "active" && !group?.require_oauth_only);
+    return available.find((group) => group.platform === "openai")
+      || available.find((group) => group.platform === "composite")
+      || null;
+  }
+
+  createAPIKey(accessToken, { name = "JobDeck", groupId, idempotencyKey } = {}) {
     return this.request("/api/v1/keys", {
       method: "POST",
       token: accessToken,
       idempotencyKey,
-      body: { name }
+      body: { name, group_id: groupId }
     });
   }
 
@@ -128,12 +140,29 @@ export class Sub2APIClient {
     const page = await this.listAPIKeys(accessToken, { search: name });
     const keys = Array.isArray(page) ? page : Array.isArray(page?.items) ? page.items : [];
     let key = keys.find((item) => String(item?.name || "").trim().toLowerCase() === name.toLowerCase());
-    if (key && key.status !== "active") key = await this.updateAPIKey(accessToken, key.id, { status: "active" });
-    if (!key) {
-      key = await this.createAPIKey(accessToken, {
-        name,
-        idempotencyKey: `jobdeck-api-key-${accountId}`
-      });
+    if (!key?.group_id) {
+      const group = this.selectGatewayGroup(await this.listAvailableGroups(accessToken));
+      if (!group?.id) {
+        throw new Sub2APIError(
+          "当前 Sub2API 账号没有可用于 OpenAI 模型的分组，请先为账号开通可用分组",
+          403,
+          "API_KEY_GROUP_UNAVAILABLE"
+        );
+      }
+      if (key) {
+        const updated = await this.updateAPIKey(accessToken, key.id, { group_id: group.id });
+        key = { ...key, ...updated, group_id: group.id };
+      } else {
+        key = await this.createAPIKey(accessToken, {
+          name,
+          groupId: group.id,
+          idempotencyKey: `jobdeck-api-key-${accountId}`
+        });
+      }
+    }
+    if (key && key.status !== "active") {
+      const updated = await this.updateAPIKey(accessToken, key.id, { status: "active" });
+      key = { ...key, ...updated, status: "active" };
     }
     if (!key?.key) throw new Sub2APIError("账号 API Key 创建成功，但服务未返回密钥", 502, "API_KEY_MISSING");
     return key;

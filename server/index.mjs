@@ -1177,8 +1177,36 @@ function bossJobDetailMatches(page, candidate, beforeFingerprint = "") {
 }
 
 function fatalAutopilotError(error) {
-  return /本人处理|验证码|登录失效|扩展(?:未连接|不可用|未授权)|托管投递已停止|浏览器操作已暂停/i
+  return /本人处理|验证码|登录失效|扩展(?:未连接|不可用|未授权)|托管投递已停止|浏览器操作已暂停|模型服务不可用|API Key is not assigned to any group|Incorrect API key|API_KEY_GROUP_UNAVAILABLE/i
     .test(String(error?.message || error || ""));
+}
+
+function autopilotProviderError(error) {
+  const message = String(error?.message || error || "");
+  if (/not assigned to any group|API_KEY_GROUP_UNAVAILABLE|没有可用于 OpenAI 模型的分组/i.test(message)) {
+    return new Error("模型服务不可用：当前 Sub2API API Key 未绑定可用分组。请刷新 JobDeck 重新登录；若仍失败，请先为该账号开通 OpenAI 模型分组。");
+  }
+  if (/Incorrect API key|invalid.*api.?key|authentication|unauthorized|\b401\b/i.test(message)) {
+    return new Error("模型服务不可用：Sub2API API Key 无效或已失效，请刷新 JobDeck 重新登录后再试。");
+  }
+  if (/forbidden|\b403\b/i.test(message)) {
+    return new Error(`模型服务不可用：Sub2API 拒绝了当前账号的模型请求（${message}）`);
+  }
+  return error;
+}
+
+async function verifyAutopilotProvider(runId) {
+  if (!autopilotActive(runId)) throw new Error("托管投递已停止");
+  setAutopilot({
+    stage: "provider-check",
+    status: "running-analysis",
+    message: "正在验证 Sub2API 模型与账号分组，验证成功后开始查找并投递"
+  });
+  try {
+    await ai.verifyProvider();
+  } catch (error) {
+    throw autopilotProviderError(error);
+  }
 }
 
 async function recoverBossListAfterCandidateError(runId, tabId, plan, candidate) {
@@ -1471,6 +1499,7 @@ function candidateMatchesExpectedLocation(candidate, activeLocation = "") {
 
 async function runAutomaticJobSearch(runId, plans, targetApplications) {
   try {
+    await verifyAutopilotProvider(runId);
     let tabId = null;
     let inspectedCount = 0;
     let discoveredCount = 0;
