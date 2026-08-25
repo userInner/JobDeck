@@ -122,7 +122,16 @@ ${String(job.description || "").slice(0, 15000)}`;
 }
 
 export function jobCompatibilityPrompt(job, candidate) {
-  return `${chatInstructions(candidate, "matching")}
+  const facts = Array.isArray(candidate?.facts) && candidate.facts.length
+    ? candidate.facts.map((fact) => `- ${fact}`).join("\n")
+    : "- 尚未录入；不得自行补充候选人经历";
+  const evidence = [
+    `求职状态：${candidate?.status || "尚未设置"}`,
+    "已核实事实：",
+    facts,
+    candidate?.resumeText ? `\n简历正文：\n${candidate.resumeText.slice(0, 12000)}` : ""
+  ].filter(Boolean).join("\n");
+  return `你是一个面向中国技术岗位的求职匹配助手。
 
 当前采用“技术匹配即投”模式。请只判断岗位方向与候选人的真实技术栈是否相符，不要计算分数，并只输出 JSON：
 {
@@ -137,8 +146,12 @@ export function jobCompatibilityPrompt(job, candidate) {
 判断规则：
 - AI Agent、AI 应用、LLM 应用、AI 全栈、Go 后端、Go + AI，以及能直接使用候选人 Go/TypeScript/React/Electron/Rust/Python/分布式系统能力的岗位，均可判为匹配。
 - 不要仅因正式任职时间短就否定匹配；可以使用候选人档案中已核实的独立项目和开源贡献作为工程证据，但不能写成正式工作。
-- 薪资或地点未写明时不要据此拒绝；仅在地点明确冲突、岗位要求纯算法博士/多年硬性经验、或核心技术方向明显不相干时判为不匹配。
+- 岗位和城市已经由用户在 BOSS 求职期望中确定，不得再使用 JobDeck 的旧目标岗位、旧城市或旧薪资配置进行筛选。
+- 薪资或地点不得作为拒绝依据；仅在岗位要求纯算法博士、明确多年硬性经验、或核心技术方向明显不相干时判为不匹配。
 - 招呼语必须引用该岗位真实要求与候选人的对应证据，不得批量复用模板，不得虚构经历。
+
+候选人证据：
+${evidence}
 
 岗位标题：${job.title || "未知"}
 公司：${job.company || "未知"}

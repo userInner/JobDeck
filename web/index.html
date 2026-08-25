@@ -71,13 +71,6 @@
             <div id="workflowResults" class="workflow-results"></div>
           </section>
 
-          <section class="brief-strip">
-            <div><small>目标方向</small><strong id="targetRoles">—</strong></div>
-            <div><small>地点</small><strong id="targetLocations">—</strong></div>
-            <div><small>薪资底线</small><strong id="salaryTarget">—</strong></div>
-            <button class="plain-link" data-go="settings" type="button">调整目标</button>
-          </section>
-
           <section class="pipeline" aria-label="求职漏斗">
             <article><span>01</span><small>已捕获</small><strong id="countCaptured">0</strong></article>
             <i>→</i>
@@ -230,16 +223,6 @@
                 <label class="full"><span>Base URL</span><input id="providerBaseURL" type="url" required /></label>
                 <label id="providerKeyField" class="full"><span>API Key</span><input id="providerKey" type="password" autocomplete="off" placeholder="已配置时可留空" /></label>
                 <div class="full"><button class="primary" type="submit">保存模型设置</button></div>
-              </form>
-            </section>
-            <section class="panel settings-panel">
-              <div class="panel-head"><div><p class="eyebrow">求职范围</p><h2>求职目标</h2></div></div>
-              <form id="targetForm" class="settings-form">
-                <label class="full"><span>目标岗位（支持换行、逗号、顿号或分号分隔）</span><textarea id="settingsRoles" rows="5" placeholder="例如：AI Agent 工程师、LLM 应用工程师、Go + AI 后端工程师"></textarea></label>
-                <label class="full"><span>目标地点（支持换行、逗号、顿号或分号分隔）</span><textarea id="settingsLocations" rows="3" placeholder="例如：北京、上海、深圳"></textarea></label>
-                <label><span>月薪底线 K</span><input id="salaryFloor" type="number" min="0" /></label>
-                <label><span>薪资上限目标 K</span><input id="salaryUpper" type="number" min="0" /></label>
-                <div class="full"><button class="primary" type="submit">保存求职目标</button></div>
               </form>
             </section>
           </div>

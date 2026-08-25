@@ -34,4 +34,8 @@ test("bulk compatibility mode uses a binary decision without score thresholds", 
   assert.match(prompt, /不要计算分数/);
   assert.match(prompt, /"matches": true \| false/);
   assert.match(prompt, /技术栈是否相符/);
+  assert.match(prompt, /岗位和城市已经由用户在 BOSS 求职期望中确定/);
+  assert.doesNotMatch(prompt, /目标岗位：AI Agent 工程师/);
+  assert.doesNotMatch(prompt, /目标地点：深圳/);
+  assert.doesNotMatch(prompt, /薪资底线：25K/);
 });

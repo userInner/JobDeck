@@ -31,6 +31,16 @@ test("automatic resume action uses the single composite endpoint", () => {
   assert.match(source, /\/api\/workflow\/resume\/auto/);
 });
 
+test("settings no longer duplicate BOSS job expectations", () => {
+  const html = fs.readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+  const source = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /id="targetForm"/);
+  assert.doesNotMatch(html, /目标岗位（/);
+  assert.doesNotMatch(html, /月薪底线 K/);
+  assert.doesNotMatch(html, /boss-source-panel/);
+  assert.doesNotMatch(source, /targetForm/);
+});
+
 test("automatic job search asks for and shows the sixty-application goal", () => {
   const source = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
   assert.match(source, /targetApplications: 60/);

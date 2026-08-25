@@ -23,7 +23,7 @@ test("automatic BOSS workflow does not directly navigate, open job URLs, or muta
   }
   assert.match(workflow, /kind:\s*["']computerClick["']/);
   assert.match(workflow, /kind:\s*["']computerType["']/);
-  assert.match(workflow, /selectSavedBossExpectation\(runId, tab\.id, page, location, keyword\)/);
+  assert.match(workflow, /selectSavedBossExpectation\(runId, tab\.id, page, expectationLabel\)/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf("async function selectBossJobCard")), /selectExpectedBossLocation\(runId, tab\.id, page, location\)/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf("async function selectBossJobCard")), /bossSearchInput\(page\)/);
 });
@@ -125,14 +125,12 @@ test("automatic job search is progress-driven until the requested verified-conta
   assert.match(source, /API Key is not assigned to any group/);
 });
 
-test("saved BOSS expectations require the visible city filter to actually change", () => {
+test("saved BOSS expectations are selected directly without a second city workflow", () => {
   const start = source.indexOf("async function selectSavedBossExpectation");
   const end = source.indexOf("async function selectExpectedBossLocation", start);
   const selection = source.slice(start, end);
-  assert.match(selection, /currentLocation === expectation\.location/);
-  assert.match(selection, /locationFilter\?\.label !== expectation\.location/);
-  assert.match(selection, /selectExpectedBossLocation\(runId, tabId, nextPage, expectation\.location\)/);
-  assert.match(selection, /Clicking the expectation again opens BOSS's mixed recommendation feed/);
+  assert.match(selection, /expectation\.selected/);
+  assert.doesNotMatch(selection, /selectExpectedBossLocation/);
   assert.doesNotMatch(selection, /filterMatches \|\| cardsMatch/);
 });
 

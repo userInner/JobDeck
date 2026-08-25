@@ -10,7 +10,7 @@ import { CONTROLLED } from "./bridge.mjs";
 import { DEFAULT_HOST, DEFAULT_PORT } from "./defaults.mjs";
 import { inferCompanyName, jobCandidatesFromPage, jobFromPage, mergeJobInput } from "./jobs.mjs";
 import { buildResumeWritePlan } from "./resume-plan.mjs";
-import { bossSearchUrl, buildAutomaticSearchPlans } from "./search-plan.mjs";
+import { bossSearchUrl, buildBossExpectationPlans } from "./search-plan.mjs";
 import { StarRewardError, StarRewardService } from "./star-rewards.mjs";
 import { Sub2APIClient, Sub2APIError } from "./sub2api-client.mjs";
 import { TenantRuntimeManager } from "./tenant-runtime.mjs";
@@ -834,7 +834,7 @@ async function exposeBossListHeader(runId, tabId, page, attempts = 7) {
   let current = page;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (!autopilotActive(runId)) throw new Error("托管投递已停止");
-    if (current?.boss?.expectationOptions?.length && current?.boss?.locationFilter?.point) return current;
+    if (current?.boss?.expectationOptions?.length) return current;
     const viewport = current?.viewport || { width: 1400, height: 800 };
     await bridge.execute({
       kind: "computerScroll",
@@ -843,7 +843,7 @@ async function exposeBossListHeader(runId, tabId, page, attempts = 7) {
       y: Math.max(140, Math.round(viewport.height * 0.32)),
       amount: 1200,
       direction: "up",
-      reason: "自动找工作：回到职位列表顶部，核对求职期望与城市"
+      reason: "自动找工作：回到职位列表顶部，核对 BOSS 求职期望"
     });
     await sleep(350);
     current = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
@@ -870,48 +870,27 @@ async function waitForStableBossLocation(runId, tabId, desired, attempts = 14, r
   throw new Error(`期望城市 ${desired} 未能保持稳定，BOSS 页面可能已回退到账号所在地`);
 }
 
-function savedBossExpectation(page, location, keyword = "") {
+function savedBossExpectation(page, expectationLabel = "") {
   const options = (page?.boss?.expectationOptions || []).filter((item) => item.point && item.label);
   if (!options.length) return null;
-  const desiredLocation = location === "远程" ? "远程" : location;
-  const keywordText = normalizedResumeText(keyword);
-  return [...options].sort((left, right) => {
-    const score = (item) => {
-      const role = normalizedResumeText(item.role || item.label);
-      let value = 0;
-      if (item.location === desiredLocation) value += 100;
-      if (keywordText && (role.includes(keywordText) || keywordText.includes(role))) value += 40;
-      if (/全栈|AI|Agent|LLM|Go|后端/i.test(item.role || item.label)) value += 20;
-      if (item.selected) value += 8;
-      return value;
-    };
-    return score(right) - score(left) || (left.bounds?.width || 9999) - (right.bounds?.width || 9999);
-  })[0];
+  const exact = options.find((item) => item.label === expectationLabel);
+  return exact || options.find((item) => item.selected) || options[0];
 }
 
-async function selectSavedBossExpectation(runId, tabId, page, location, keyword = "") {
+async function selectSavedBossExpectation(runId, tabId, page, expectationLabel = "") {
   page = await exposeBossListHeader(runId, tabId, page);
-  const expectation = savedBossExpectation(page, location, keyword);
+  const expectation = savedBossExpectation(page, expectationLabel);
   if (!expectation) {
     throw new Error("没有识别到 BOSS 顶部已保存的求职期望。请先在 BOSS 添加包含岗位和城市的求职期望，再启动自动找工作");
   }
-  const currentLocation = page?.boss?.locationFilter?.label;
   const hasJobList = page?.adapter === "boss-zhipin"
     && page?.pageType === "job-list"
     && Boolean(page?.boss?.jobCards?.length);
-  // Once the saved expectation's city is active, keep consuming that list.
-  // Clicking the expectation again opens BOSS's mixed recommendation feed and
-  // can temporarily restore the browser's physical city.
-  if (hasJobList && expectation.location !== "全国" && expectation.location !== "远程"
-    && currentLocation === expectation.location) {
+  if (hasJobList && expectation.selected) {
     return { page, expectation };
   }
   const point = centerOf(expectation, `求职期望 ${expectation.label}`);
-  setAutopilot({
-    message: expectation.location === location
-      ? `Computer Use 正在选择求职期望：${expectation.label}`
-      : `没有找到 ${location} 的已保存期望，改用 ${expectation.label}`
-  });
+  setAutopilot({ message: `Computer Use 正在选择 BOSS 求职期望：${expectation.label}` });
   await bridge.execute({ kind: "computerMove", tabId, x: point.x, y: point.y, reason: `自动找工作：移动到求职期望 ${expectation.label}` });
   await bridge.execute({ kind: "computerClick", tabId, x: point.x, y: point.y, reason: `自动找工作：选择求职期望 ${expectation.label}` });
 
@@ -925,11 +904,6 @@ async function selectSavedBossExpectation(runId, tabId, page, location, keyword 
     tabId
   );
   nextPage = await exposeBossListHeader(runId, tabId, nextPage);
-  if (expectation.location !== "全国" && expectation.location !== "远程"
-    && nextPage?.boss?.locationFilter?.label !== expectation.location) {
-    setAutopilot({ message: `${expectation.label} 已打开，Computer Use 正在切换到期望城市 ${expectation.location}` });
-    nextPage = await selectExpectedBossLocation(runId, tabId, nextPage, expectation.location);
-  }
   return { page: nextPage, expectation };
 }
 
@@ -1082,7 +1056,7 @@ async function advanceBossJobResults(runId, tabId, seenUrls) {
   return null;
 }
 
-async function openBossJobList({ keyword, location, tabId = null, runId = null, attempts = 20 } = {}) {
+async function openBossJobList({ expectationLabel = "", tabId = null, runId = null, attempts = 20 } = {}) {
   if (runId && !autopilotActive(runId)) throw new Error("托管投递已停止");
   let tab = Number.isInteger(tabId) && tabId > 0 ? { id: tabId } : null;
   let page;
@@ -1093,7 +1067,7 @@ async function openBossJobList({ keyword, location, tabId = null, runId = null, 
     tab = await bridge.execute({ kind: "openBossJobs" });
     page = await waitForBossList(runId, tab.id, "BOSS 职位列表", attempts);
   }
-  const selected = await selectSavedBossExpectation(runId, tab.id, page, location, keyword);
+  const selected = await selectSavedBossExpectation(runId, tab.id, page, expectationLabel);
   page = selected.page;
   return {
     page,
@@ -1222,7 +1196,7 @@ async function recoverBossListAfterCandidateError(runId, tabId, plan, candidate)
   } catch (error) {
     if (fatalAutopilotError(error)) throw error;
   }
-  setAutopilot({ message: `正在恢复 ${plan.location} / ${plan.keyword} 的职位列表，继续下一个岗位` });
+  setAutopilot({ message: `正在恢复 BOSS 求职期望 ${plan.expectationLabel} 的职位列表，继续下一个岗位` });
   return openBossJobList({ ...plan, tabId, runId });
 }
 
@@ -1515,10 +1489,18 @@ function candidateMatchesExpectedLocation(candidate, activeLocation = "") {
     : haystack.includes(location));
 }
 
-async function runAutomaticJobSearch(runId, plans, targetApplications) {
+async function runAutomaticJobSearch(runId, targetApplications) {
   try {
     await verifyAutopilotProvider(runId);
-    let tabId = null;
+    const initialTab = await bridge.execute({ kind: "openBossJobs" });
+    let tabId = initialTab.id;
+    let initialPage = await waitForBossList(runId, tabId, "BOSS 职位列表", 20);
+    initialPage = await exposeBossListHeader(runId, tabId, initialPage);
+    const plans = buildBossExpectationPlans(initialPage?.boss?.expectationOptions || []);
+    if (!plans.length) {
+      throw new Error("没有识别到 BOSS 顶部已保存的求职期望。请先在 BOSS 添加求职期望，再启动自动找工作");
+    }
+    setAutopilot({ message: `已读取 ${plans.length} 个 BOSS 求职期望，直接按 BOSS 的岗位和城市开始查找` });
     let inspectedCount = 0;
     let discoveredCount = 0;
     let addedCount = 0;
@@ -1535,7 +1517,7 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
       setAutopilot({
         stage: "searching",
         status: "running-search",
-        message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；Computer Use 正在搜索 ${plan.location} / ${plan.keyword}`
+        message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；Computer Use 正在处理 BOSS 求职期望 ${plan.expectationLabel}`
       });
 
       try {
@@ -1618,7 +1600,7 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
         }
       } catch (error) {
         if (fatalAutopilotError(error)) throw error;
-        store.addActivity(`搜索计划 ${plan.location}/${plan.keyword} 暂时跳过：${error.message}`, "error");
+        store.addActivity(`BOSS 求职期望 ${plan.expectationLabel} 暂时跳过：${error.message}`, "error");
       }
 
       const progressed = inspectedCount > inspectedBeforePlan || store.state.workflow.autopilot.sent > sentBeforePlan;
@@ -1630,11 +1612,11 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
     store.update((state) => {
       state.workflow.search.discovered += addedCount;
       state.workflow.search.locations = [...new Set(plans.map((plan) => plan.location))];
-      state.workflow.search.queries = [...new Set(plans.map((plan) => plan.keyword))];
+      state.workflow.search.queries = [...new Set(plans.map((plan) => plan.role))];
     });
     const sent = store.state.workflow.autopilot.sent;
     if (sent < targetApplications) {
-      throw new Error(`目标尚未完成：已验证沟通 ${sent}/${targetApplications}；所有期望城市和关键词暂未发现新的匹配岗位`);
+      throw new Error(`目标尚未完成：已验证沟通 ${sent}/${targetApplications}；BOSS 已保存的求职期望暂未发现新的匹配岗位`);
     }
     setAutopilot({
       status: "complete",
@@ -1651,7 +1633,6 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
 }
 
 function startAutomaticJobSearch(requestedTarget) {
-  const plans = buildAutomaticSearchPlans(store.state.candidate, store.state.workflow.search.keyword);
   const targetApplications = automaticApplicationTarget(requestedTarget);
   const runId = crypto.randomUUID();
   store.update((state) => {
@@ -1665,7 +1646,7 @@ function startAutomaticJobSearch(requestedTarget) {
     autoApply: true,
     autoApplyLimit: targetApplications,
     targetApplications,
-    message: `目标 0/${targetApplications}；准备按期望城市与多个技术方向持续搜索`,
+    message: `目标 0/${targetApplications}；准备读取 BOSS 已保存的求职期望`,
     discovered: 0,
     analyzed: 0,
     selected: 0,
@@ -1677,9 +1658,9 @@ function startAutomaticJobSearch(requestedTarget) {
     startedAt: new Date().toISOString(),
     completedAt: null
   });
-  store.addActivity(`Computer Use 自动找工作启动：目标至少 ${targetApplications} 份，只使用期望城市 ${[...new Set(plans.map((plan) => plan.location))].join("、")}`);
-  queueMicrotask(() => runAutomaticJobSearch(runId, plans, targetApplications));
-  return { runId, searches: plans.length, targetApplications, locations: [...new Set(plans.map((plan) => plan.location))] };
+  store.addActivity(`Computer Use 自动找工作启动：目标至少 ${targetApplications} 份，岗位与城市完全使用 BOSS 已保存的求职期望`);
+  queueMicrotask(() => runAutomaticJobSearch(runId, targetApplications));
+  return { runId, targetApplications, source: "boss-expectations" };
 }
 
 async function startAutopilotFromCurrentList() {
@@ -1946,7 +1927,7 @@ const agentTools = [
   },
   {
     name: "search_and_apply_jobs",
-    description: "按期望城市循环搜索、读完整 JD、判断技术匹配并发送逐岗位定制招呼语",
+    description: "读取 BOSS 已保存求职期望、循环浏览完整 JD、技术匹配即发送逐岗位定制招呼语",
     input: { targetApplications: "希望完成的已验证沟通数量，1到500；未指定时默认60" },
     risk: "jobs:apply",
     execute: async (arguments_) => {

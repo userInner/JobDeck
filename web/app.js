@@ -196,13 +196,13 @@ function renderWorkflow() {
     "resume-optimizing": ["AI 正在帮你修改简历", workflow.resumeOptimizationMessage || "正在生成按字段拆分的可替换优化稿。"],
     "resume-applying": ["插件 Computer Use 正在修改 BOSS 简历", workflow.resumeApply?.message || "正在移动、点击、输入、保存并回读验证。"],
     "resume-review": ["先决定简历是否需要修改", "审查已经完成。建议先处理会影响 AI 岗位判断的问题，再进入职位搜索。"],
-    "search-open": ["按期望城市去 BOSS 找岗位", `点击“自动找工作”后会按设置中的期望城市（${state.candidate.locations.join("、")}）搜索目标岗位；不会读取或沿用浏览器当前位置。`],
+    "search-open": ["按 BOSS 求职期望找岗位", "点击“自动找工作”后会读取 BOSS 顶部已保存的求职期望，并使用其中的岗位与城市。"],
     shortlist: ["候选岗位需要逐条读完整 JD", `已发现 ${workflow.search?.discovered || 0} 个候选，已完成 ${workflow.search?.analyzed || 0} 个完整 JD 分析。`],
     "job-open": ["读取当前岗位的完整 JD", "候选岗位已经打开。等待页面加载完成后再分析，避免只凭职位卡片判断。"],
     "ready-to-apply": ["高匹配小批次已经准备好", `本批共 ${workflow.batch?.length || 0} 个岗位；逐条打开、核对招呼语并确认联系。`],
     "apply-review": ["核对当前投递", "岗位详情已经打开。请核对岗位状态和定制招呼语，再进入沟通。"],
     "analysis-running": workflow.autopilot?.autoApply
-      ? ["自动找工作正在运行", `目标至少 ${workflow.autopilot?.targetApplications || 60} 份。系统会按期望城市（${state.candidate.locations.join("、")}）持续搜索、翻页并读取完整 JD，匹配后发送各自的定制招呼语。`]
+      ? ["自动找工作正在运行", `目标至少 ${workflow.autopilot?.targetApplications || 60} 份。系统会循环处理 BOSS 已保存的求职期望，读取完整 JD，技术与岗位匹配后直接发送定制招呼语。`]
       : ["正在建立岗位排名", "系统正在逐条打开最多 8 个候选，读取完整 JD，并按经历、技术栈、地点和薪资评分。"],
     "ranking-ready": ["排名好了，由你决定投哪些", "70 分以上默认勾选，但不是硬限制。你可以单选、多选、只选推荐项，或者全部投递。"],
     "autopilot-running": ["匹配岗位正在投递", "系统已完成岗位与技术栈判断，正在逐条发送基于真实 JD 的定制招呼语。"],
@@ -346,11 +346,6 @@ function countStatus(...statuses) {
 }
 
 function renderDashboard() {
-  $("#targetRoles").textContent = state.candidate.targetRoles.join(" · ") || "尚未设置";
-  $("#targetLocations").textContent = state.candidate.locations.join(" · ") || "尚未设置";
-  $("#salaryTarget").textContent = Number(state.candidate.salaryFloorK) > 0 || Number(state.candidate.salaryUpperTargetK) > 0
-    ? `${state.candidate.salaryFloorK || "未设"}K+ / 上限 ${state.candidate.salaryUpperTargetK || "未设"}K+`
-    : "尚未设置";
   $("#countCaptured").textContent = state.jobs.length;
   $("#countRecommended").textContent = state.jobs.filter((job) => Number(job.score) >= 70).length;
   $("#countSent").textContent = countStatus("sent", "replied", "interview");
@@ -431,10 +426,6 @@ function renderSettings() {
   setValueUnlessFocused("#providerMode", state.provider.mode);
   setValueUnlessFocused("#providerModel", state.provider.model);
   setValueUnlessFocused("#providerBaseURL", state.provider.baseURL);
-  setValueUnlessFocused("#settingsRoles", state.candidate.targetRoles.join("\n"));
-  setValueUnlessFocused("#settingsLocations", state.candidate.locations.join("\n"));
-  setValueUnlessFocused("#salaryFloor", state.candidate.salaryFloorK);
-  setValueUnlessFocused("#salaryUpper", state.candidate.salaryUpperTargetK);
   const managed = state.provider.source === "sub2api";
   $("#providerKeyField").hidden = managed;
   $("#providerBaseURL").readOnly = managed;
@@ -695,8 +686,7 @@ async function runWorkflowAction(action, button) {
     return;
   }
   if (action === "auto-find-jobs") {
-    const locations = state.candidate.locations.join("、");
-    const approved = window.confirm(`将启动目标制自动求职：\n\n· 本次目标：至少验证沟通 60 个匹配岗位\n· 只按期望城市搜索：${locations}\n· 不使用浏览器定位或当前所在城市\n· 循环搜索 AI Agent、LLM/AI 应用、AIGC 全栈和 Go+AI 后端方向\n· 自动滚动、翻页、读取完整 JD，不计算分数，只判断岗位和核心技术栈是否匹配\n· 每个匹配岗位生成不同的定制招呼并自动发送\n· 发送后自动返回岗位列表继续执行，不以固定步骤数结束\n· 自动跳过已沟通、重复及明确不匹配的岗位\n\n完成 60 个验证沟通后结束；遇到验证码、登录失效、平台风控或所有搜索方向连续没有新岗位时暂停。是否授权？`);
+    const approved = window.confirm(`将启动目标制自动求职：\n\n· 本次目标：至少验证沟通 60 个匹配岗位\n· 岗位与城市完全使用 BOSS 顶部已保存的求职期望\n· 不读取 JobDeck 旧的岗位、城市或薪资配置\n· 自动滚动、翻页、读取完整 JD，不计算分数，只判断岗位和核心技术栈是否匹配\n· 技术与岗位相符就直接沟通，并为每个岗位发送不同的定制招呼\n· 发送后自动返回岗位列表继续执行，不以固定步骤数结束\n· 自动跳过已沟通、重复及明确不匹配的岗位\n\n完成 60 个验证沟通后结束；遇到验证码、登录失效、平台风控或所有 BOSS 求职期望连续没有新岗位时暂停。是否授权？`);
     if (!approved) return;
     setBusy(button, true, "启动自动找工作…");
     try {
@@ -704,7 +694,7 @@ async function runWorkflowAction(action, button) {
         method: "POST",
         body: JSON.stringify({ approved: true, targetApplications: 60 })
       });
-      toast(`已启动 ${result.searches} 组搜索，目标至少 ${result.targetApplications} 份，只使用：${result.locations.join("、")}`);
+      toast(`已启动自动找工作，目标至少 ${result.targetApplications} 份，将直接读取 BOSS 求职期望`);
       await refresh();
     } catch (error) { toast(error.message); }
     finally { setBusy(button, false); }
@@ -963,22 +953,6 @@ $("#providerForm").addEventListener("submit", async (event) => {
     }) });
     $("#providerKey").value = "";
     toast("模型设置已保存");
-    await refresh();
-  } catch (error) { toast(error.message); }
-  finally { setBusy(button, false); }
-});
-
-$("#targetForm").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const button = $("#targetForm button[type='submit']");
-  setBusy(button, true, "保存中…");
-  try {
-    await api("/api/candidate", { method: "PATCH", body: JSON.stringify({
-      targetRoles: parseListInput($("#settingsRoles").value),
-      locations: parseListInput($("#settingsLocations").value),
-      salaryFloorK: Number($("#salaryFloor").value), salaryUpperTargetK: Number($("#salaryUpper").value)
-    }) });
-    toast("求职目标已保存");
     await refresh();
   } catch (error) { toast(error.message); }
   finally { setBusy(button, false); }
