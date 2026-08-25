@@ -70,3 +70,20 @@ test("greeting rewrite prompt carries the JD, evidence boundary and failed-quali
   assert.match(prompt, /包含平台默认或空泛话术/);
   assert.match(prompt, /90 到 150 字/);
 });
+
+test("greeting rules prefer verified OnPeople and Cherry Studio evidence when relevant", () => {
+  const prompt = recruiterGreetingPrompt({
+    title: "AI Agent 全栈工程师",
+    company: "示例公司",
+    description: "建设 Agent Runtime、工具调用与桌面工作台"
+  }, {
+    facts: [
+      "独立开发基于 OpenAI Codex App Server 的 OnPeople Agent 工作台",
+      "Cherry Studio GitHub 5 万+ Star、前 30 贡献者"
+    ]
+  }, { matches: true }, "原始招呼");
+
+  assert.match(prompt, /OpenAI Codex App Server/);
+  assert.match(prompt, /5 万\+ Star、前 30 贡献者/);
+  assert.match(prompt, /不要把这些事实套用给其他候选人/);
+});
