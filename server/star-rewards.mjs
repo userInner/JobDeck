@@ -7,6 +7,7 @@ const USERNAME_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 const CHALLENGE_TTL_MS = 30 * 60 * 1000;
 const SCREENSHOT_MIN_BYTES = 256;
 const SCREENSHOT_MAX_BYTES = 4 * 1024 * 1024;
+const MANUAL_REVIEW_STATUS = "pending_review";
 
 export class StarRewardError extends Error {
   constructor(message, status = 400, code = "STAR_REWARD_ERROR") {
@@ -49,7 +50,9 @@ export class StarRewardService {
     this.githubToken = String(githubToken).trim();
     this.fetch = fetchImpl;
     this.now = now;
+    this.directory = directory;
     this.file = path.join(directory, "star-rewards.json");
+    this.evidenceDirectory = path.join(directory, "star-reward-evidence");
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.ledger = this.load();
   }
@@ -150,9 +153,14 @@ export class StarRewardService {
 
   async rewardVerified({ profile, githubUser, evidenceType, evidenceHash = "" }) {
     const userId = accountId(profile);
-    const duplicate = this.ledger.rewards.find((item) => String(item.sub2apiUserId) === userId || item.githubUserId === githubUser.id);
-    if (duplicate?.status === "rewarded") throw new StarRewardError("该 AI 账号或 GitHub 账号已经领取过奖励", 409, "ALREADY_REWARDED");
-    if (duplicate?.status === "pending" && (String(duplicate.sub2apiUserId) !== userId || duplicate.githubUserId !== githubUser.id)) {
+    const rewarded = this.ledger.rewards.find((item) => item.status === "rewarded"
+      && (String(item.sub2apiUserId) === userId || item.githubUserId === githubUser.id));
+    if (rewarded) throw new StarRewardError("该 AI 账号或 GitHub 账号已经领取过奖励", 409, "ALREADY_REWARDED");
+    // Only an identity-bound automatic claim reserves a GitHub identity. A
+    // screenshot submission is deliberately not trusted to prove ownership.
+    const duplicate = this.ledger.rewards.find((item) => item.status === "pending"
+      && (String(item.sub2apiUserId) === userId || item.githubUserId === githubUser.id));
+    if (duplicate && (String(duplicate.sub2apiUserId) !== userId || duplicate.githubUserId !== githubUser.id)) {
       throw new StarRewardError("该 AI 账号或 GitHub 账号已有奖励正在处理", 409, "REWARD_PENDING");
     }
     if (evidenceHash) {
@@ -186,6 +194,52 @@ export class StarRewardService {
     return { amount: this.amount, repository: this.repository, githubUsername: githubUser.login, rewardedAt: reward.rewardedAt };
   }
 
+  queueScreenshotReview({ profile, githubUser, screenshot, mime, evidenceHash }) {
+    const userId = accountId(profile);
+    const rewarded = this.ledger.rewards.find((item) => item.status === "rewarded"
+      && (String(item.sub2apiUserId) === userId || item.githubUserId === githubUser.id));
+    if (rewarded) throw new StarRewardError("该 AI 账号或 GitHub 账号已经领取过奖励", 409, "ALREADY_REWARDED");
+    const pending = this.ledger.rewards.find((item) => item.status === MANUAL_REVIEW_STATUS
+      && String(item.sub2apiUserId) === userId);
+    if (pending) throw new StarRewardError("该 AI 账号的截图证明正在人工审核", 409, "REWARD_PENDING");
+    const reused = this.ledger.rewards.find((item) => item.evidenceHash === evidenceHash);
+    if (reused) throw new StarRewardError("这张截图已经提交过", 409, "SCREENSHOT_REUSED");
+
+    const id = crypto.randomUUID();
+    const extension = mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : "webp";
+    fs.mkdirSync(this.evidenceDirectory, { recursive: true, mode: 0o700 });
+    const evidenceFile = `${id}.${extension}`;
+    fs.writeFileSync(path.join(this.evidenceDirectory, evidenceFile), screenshot, { flag: "wx", mode: 0o600 });
+    const submittedAt = new Date(this.now()).toISOString();
+    this.ledger.rewards.push({
+      id,
+      sub2apiUserId: userId,
+      githubUserId: githubUser.id,
+      githubUsername: githubUser.login,
+      repository: this.repository,
+      amount: this.amount,
+      status: MANUAL_REVIEW_STATUS,
+      reviewRequired: true,
+      evidenceType: "screenshot",
+      evidenceHash,
+      evidenceFile,
+      evidenceMime: mime,
+      evidenceBytes: screenshot.length,
+      createdAt: submittedAt,
+      submittedAt
+    });
+    this.save();
+    return {
+      status: MANUAL_REVIEW_STATUS,
+      reviewRequired: true,
+      amount: this.amount,
+      repository: this.repository,
+      githubUsername: githubUser.login,
+      submittedAt,
+      evidence: { type: "screenshot", mime, bytes: screenshot.length }
+    };
+  }
+
   async claimScreenshot(accessToken, { username, screenshot }) {
     const profile = await this.authenticatedProfile(accessToken);
     const normalized = String(username || "").trim();
@@ -200,8 +254,7 @@ export class StarRewardService {
     const githubUser = await this.github(`/users/${encodeURIComponent(normalized)}`);
     if (!(await this.hasStar(githubUser.login))) throw new StarRewardError(`请先公开 Star ${this.repository} 后再领取`, 409, "STAR_NOT_FOUND");
     const evidenceHash = crypto.createHash("sha256").update(screenshot).digest("hex");
-    const result = await this.rewardVerified({ profile, githubUser, evidenceType: "screenshot", evidenceHash });
-    return { ...result, evidence: { type: "screenshot", mime, bytes: screenshot.length } };
+    return this.queueScreenshotReview({ profile, githubUser, screenshot, mime, evidenceHash });
   }
 
   async claim(accessToken, { challengeId, gistUrl }) {

@@ -21,6 +21,8 @@ JobDeck 不读取 Chrome 的 Cookie 数据库，也不创建独立的自动化�
 
 Agent 运行时维护一个动态工具注册表。模型每轮只能选择一个工具，读取真实结果后再决定下一步：
 
+编排由目标差额和最新页面观察持续驱动；运行状态只作为外部操作的幂等事务检查点，不是限制 Agent 下一步的固定流程。
+
 ![JobDeck 求职 Agent](docs/images/agent.jpg)
 
 ```text

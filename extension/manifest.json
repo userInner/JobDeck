@@ -1,14 +1,21 @@
 {
   "manifest_version": 3,
   "name": "JobDeck 求职执行器",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "minimum_chrome_version": "116",
   "description": "把本地 AI 求职工作台与当前 Chrome 登录会话连接起来。",
   "permissions": ["tabs", "scripting", "storage", "alarms", "sidePanel", "debugger"],
-  "host_permissions": ["http://127.0.0.1/*"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://job.aibro.vip/*"
+  ],
+  "optional_host_permissions": [
+    "https://zhipin.com/*",
+    "https://*.zhipin.com/*"
+  ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https://* wss://*"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https://job.aibro.vip wss://job.aibro.vip"
   },
   "background": {
     "service_worker": "service-worker.js"

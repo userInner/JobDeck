@@ -24,6 +24,13 @@ test("browser actions preserve an explicit Chrome tab target", () => {
   assert.equal(action.tabId, 123);
 });
 
+test("browser actions preserve a bounded physical operation attempt", () => {
+  const action = normalizeAction({ kind: "computerClick", operationId: "boss:run:job:contact", operationAttempt: 3 });
+  assert.equal(action.operationId, "boss:run:job:contact");
+  assert.equal(action.operationAttempt, 3);
+  assert.equal(normalizeAction({ kind: "computerClick", operationAttempt: 999 }).operationAttempt, 100);
+});
+
 test("mouse-style actions keep bounded viewport coordinates", () => {
   const move = normalizeAction({ kind: "mouseMove", x: 240, y: 360 });
   assert.deepEqual({ x: move.x, y: move.y }, { x: 240, y: 360 });

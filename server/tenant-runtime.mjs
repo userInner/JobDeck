@@ -6,6 +6,51 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { BrowserBridge } from "./bridge.mjs";
 import { Store } from "./store.mjs";
 
+export const JOBDECK_AUTH_SCOPES = Object.freeze({
+  STATE_READ: "state:read",
+  BROWSER_OPERATE: "browser:operate",
+  ACTIONS_DECIDE: "actions:decide",
+  JOBS_MANAGE: "jobs:manage",
+  MESSAGES_DRAFT: "messages:draft",
+  TENANT_SETTINGS: "tenant:settings",
+  REWARDS_CLAIM: "rewards:claim"
+});
+
+const DEVICE_SCOPES = Object.freeze([
+  JOBDECK_AUTH_SCOPES.STATE_READ,
+  JOBDECK_AUTH_SCOPES.BROWSER_OPERATE,
+  JOBDECK_AUTH_SCOPES.ACTIONS_DECIDE,
+  JOBDECK_AUTH_SCOPES.JOBS_MANAGE,
+  JOBDECK_AUTH_SCOPES.MESSAGES_DRAFT
+]);
+
+const ACCOUNT_SCOPES = Object.freeze([
+  ...DEVICE_SCOPES,
+  JOBDECK_AUTH_SCOPES.TENANT_SETTINGS,
+  JOBDECK_AUTH_SCOPES.REWARDS_CLAIM
+]);
+
+export function jobdeckAuthHasScope(auth, scope) {
+  return Boolean(auth?.scopes?.includes(String(scope)));
+}
+
+const DEVICE_HTTP_SCOPE_RULES = Object.freeze([
+  { method: "GET", pattern: /^\/state\/?$/, scope: JOBDECK_AUTH_SCOPES.STATE_READ },
+  { method: "POST", pattern: /^\/browser\/(?:command|plan)\/?$/, scope: JOBDECK_AUTH_SCOPES.BROWSER_OPERATE },
+  { method: "POST", pattern: /^\/automation\/(?:pause|resume)\/?$/, scope: JOBDECK_AUTH_SCOPES.BROWSER_OPERATE },
+  { method: "POST", pattern: /^\/jobs\/(?:capture-current|discover-current)\/?$/, scope: JOBDECK_AUTH_SCOPES.JOBS_MANAGE },
+  { method: "POST", pattern: /^\/boss\/draft-reply\/?$/, scope: JOBDECK_AUTH_SCOPES.MESSAGES_DRAFT },
+  { method: "POST", pattern: /^\/actions\/[^/]+\/(?:approve|reject)\/?$/, scope: JOBDECK_AUTH_SCOPES.ACTIONS_DECIDE }
+]);
+
+export function jobdeckDeviceRequestScope(method, pathname) {
+  const normalizedMethod = String(method || "GET").trim().toUpperCase();
+  const normalizedPath = String(pathname || "/").split("?", 1)[0] || "/";
+  return DEVICE_HTTP_SCOPE_RULES.find((rule) => (
+    rule.method === normalizedMethod && rule.pattern.test(normalizedPath)
+  ))?.scope || null;
+}
+
 function accountId(profile) {
   return String(profile?.id ?? profile?.user_id ?? profile?.user?.id ?? "").trim();
 }
@@ -166,6 +211,27 @@ export class TenantRuntimeManager {
     return token ? this.deviceTokens.get(tokenDigest(token)) || null : null;
   }
 
+  async resolveRequestAuth(req) {
+    if (!this.multiUser) {
+      return {
+        tenant: this.local,
+        auth: { kind: "local", tenantId: this.local.id, scopes: [...ACCOUNT_SCOPES] }
+      };
+    }
+    const authorization = String(req?.headers?.authorization || "");
+    const bearer = authorization.toLowerCase().startsWith("bearer ") ? authorization.slice(7).trim() : "";
+    const deviceToken = String(req?.headers?.["x-jobdeck-token"] || "").trim();
+    if (bearer) {
+      const tenant = await this.fromAccessToken(bearer);
+      return { tenant, auth: { kind: "account", tenantId: tenant.id, scopes: [...ACCOUNT_SCOPES] } };
+    }
+    if (deviceToken) {
+      const tenant = this.fromDeviceToken(deviceToken);
+      if (tenant) return { tenant, auth: { kind: "device", tenantId: tenant.id, scopes: [...DEVICE_SCOPES] } };
+    }
+    return null;
+  }
+
   setAgentFactory(factory) {
     this.agentFactory = factory;
   }
@@ -188,17 +254,22 @@ export class TenantRuntimeManager {
     return tenant.agentRuntime;
   }
 
-  middleware() {
+  middleware({ allowedKinds = ["local", "account", "device"], requiredScopes = [] } = {}) {
+    const allowed = new Set(allowedKinds.map(String));
+    const required = [...new Set(requiredScopes.map(String))];
     return async (req, res, next) => {
-      if (!this.multiUser) return this.run(this.local, next);
       try {
-        const authorization = String(req.headers.authorization || "");
-        const bearer = authorization.toLowerCase().startsWith("bearer ") ? authorization.slice(7).trim() : "";
-        const device = String(req.headers["x-jobdeck-token"] || "").trim();
-        const tenant = bearer ? await this.fromAccessToken(bearer) : this.fromDeviceToken(device);
-        if (!tenant) return res.status(401).json({ error: "请先登录 JobDeck 账号", code: "AUTH_REQUIRED" });
-        req.jobdeckTenant = tenant;
-        return this.run(tenant, next);
+        const resolved = await this.resolveRequestAuth(req);
+        if (!resolved) return res.status(401).json({ error: "请先登录 JobDeck 账号", code: "AUTH_REQUIRED" });
+        if (!allowed.has(resolved.auth.kind)) {
+          return res.status(403).json({ error: "当前连接凭证不能访问此功能", code: "AUTH_KIND_FORBIDDEN" });
+        }
+        if (required.some((scope) => !jobdeckAuthHasScope(resolved.auth, scope))) {
+          return res.status(403).json({ error: "当前连接凭证缺少所需权限", code: "AUTH_SCOPE_REQUIRED" });
+        }
+        req.jobdeckTenant = resolved.tenant;
+        req.jobdeckAuth = resolved.auth;
+        return this.run(resolved.tenant, next);
       } catch (error) {
         return res.status(Number.isInteger(error.status) ? error.status : 401).json({ error: "登录状态已失效，请重新登录", code: "AUTH_REQUIRED" });
       }
@@ -210,14 +281,16 @@ export class TenantRuntimeManager {
       const url = new URL(req.url, "http://127.0.0.1");
       const origin = String(req.headers.origin || "");
       const protocols = String(req.headers["sec-websocket-protocol"] || "").split(",").map((item) => item.trim());
-      const protocolToken = protocols.find((item) => item.startsWith("token."))?.slice(6) || "";
-      const suppliedToken = protocolToken || url.searchParams.get("token") || "";
+      const protocolTokens = protocols.filter((item) => item.startsWith("token."));
+      const suppliedToken = protocolTokens.length === 1 ? protocolTokens[0].slice(6) : "";
       const tenant = this.multiUser ? this.fromDeviceToken(suppliedToken) : this.local;
       const expectedToken = tenant?.store?.secrets?.extensionToken || "";
       const supplied = Buffer.from(suppliedToken);
       const expected = Buffer.from(expectedToken);
       const tokenMatches = supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
-      if (url.pathname !== "/extension" || !tenant || !tokenMatches || !origin.startsWith("chrome-extension://")) {
+      const extensionOrigin = /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+      if (url.pathname !== "/extension" || !protocols.includes("jobdeck") || protocolTokens.length !== 1
+        || !tenant || !tokenMatches || !extensionOrigin) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;

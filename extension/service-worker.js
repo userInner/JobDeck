@@ -11,6 +11,8 @@ let socket;
 let reconnectTimer;
 let heartbeatTimer;
 let currentState = { connected: false, lastError: "本地服务尚未连接" };
+const ACTION_RECEIPTS_KEY = "jobdeckActionReceipts";
+const ACTION_RECEIPT_LIMIT = 120;
 
 async function settings() {
   return { ...DEFAULTS, ...(await chrome.storage.local.get(DEFAULTS)) };
@@ -43,7 +45,7 @@ async function connect() {
       catch { return; }
       if (message.type !== "command") return;
       try {
-        const data = await execute(message.action);
+        const data = await executeOnce(message.action);
         send({ type: "result", id: message.id, ok: true, data });
       } catch (error) {
         send({ type: "result", id: message.id, ok: false, error: error.message });
@@ -62,6 +64,31 @@ async function connect() {
     await updateState(false, error.message);
     reconnectTimer = setTimeout(connect, 5000);
   }
+}
+
+async function executeOnce(action) {
+  const operationId = String(action?.operationId || "").trim();
+  if (!operationId) return execute(action);
+  const operationAttempt = Math.max(0, Math.trunc(Number(action?.operationAttempt) || 0));
+  // A logical action keeps one id, while a page-confirmed retry receives a
+  // new physical attempt. Replaying that exact attempt remains idempotent.
+  const receiptKey = operationAttempt > 0
+    ? `${operationId}:attempt:${operationAttempt}`
+    : operationId;
+  const stored = await chrome.storage.local.get({ [ACTION_RECEIPTS_KEY]: {} });
+  const receipts = stored[ACTION_RECEIPTS_KEY] || {};
+  const existing = receipts[receiptKey];
+  if (existing?.status === "done") return existing.result;
+
+  const result = await execute(action);
+  receipts[receiptKey] = { status: "done", result, at: Date.now() };
+  const compact = Object.fromEntries(
+    Object.entries(receipts)
+      .sort((left, right) => Number(right[1]?.at || 0) - Number(left[1]?.at || 0))
+      .slice(0, ACTION_RECEIPT_LIMIT)
+  );
+  await chrome.storage.local.set({ [ACTION_RECEIPTS_KEY]: compact });
+  return result;
 }
 
 function send(message) {

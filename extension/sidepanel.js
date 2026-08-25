@@ -11,6 +11,18 @@ let origin = "";
 let allowed = false;
 let toastTimer;
 
+function supportedOrigin(value) {
+  try {
+    const candidate = new URL(value);
+    const workspaceOrigin = new URL(apiBase).origin;
+    const boss = candidate.protocol === "https:"
+      && (candidate.hostname === "zhipin.com" || candidate.hostname.endsWith(".zhipin.com"));
+    return candidate.origin === workspaceOrigin || boss;
+  } catch {
+    return false;
+  }
+}
+
 const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;"
 })[char]);
@@ -36,12 +48,14 @@ async function loadTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   try { origin = new URL(tab?.url || "").origin; }
   catch { origin = ""; }
-  elements.site.textContent = origin && origin !== "null" ? origin : "此页面不可授权";
+  const supported = origin && origin !== "null" && supportedOrigin(origin);
+  elements.site.textContent = supported ? origin : "仅支持 JobDeck 与 BOSS 直聘";
   const stored = await chrome.storage.local.get({ allowedOrigins: [] });
-  const hasPermission = origin && origin !== "null" ? await chrome.permissions.contains({ origins: [`${origin}/*`] }) : false;
-  allowed = Boolean(origin && origin !== "null" && stored.allowedOrigins.includes(origin) && hasPermission);
+  const hasPermission = supported ? await chrome.permissions.contains({ origins: [`${origin}/*`] }) : false;
+  allowed = Boolean(supported && stored.allowedOrigins.includes(origin) && hasPermission);
   elements.siteToggle.textContent = allowed ? "停止控制" : "允许此站点";
   elements.siteToggle.classList.toggle("allowed", allowed);
+  elements.siteToggle.disabled = !supported;
 }
 
 function render(next) {
@@ -139,7 +153,10 @@ $("#settings").addEventListener("click", () => chrome.runtime.openOptionsPage())
 $("#openWeb").addEventListener("click", () => chrome.tabs.create({ url: apiBase }));
 
 elements.siteToggle.addEventListener("click", async () => {
-  if (!origin || origin === "null") return;
+  if (!origin || origin === "null" || !supportedOrigin(origin)) {
+    showToast("扩展只允许控制 JobDeck 与 BOSS 直聘页面");
+    return;
+  }
   const pattern = `${origin}/*`;
   if (allowed) await chrome.permissions.remove({ origins: [pattern] });
   else if (!(await chrome.permissions.request({ origins: [pattern] }))) return;

@@ -1,3 +1,202 @@
+function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
+  const geometry = (element) => {
+    if (!element) return {};
+    const rect = element.getBoundingClientRect();
+    return {
+      point: { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) },
+      bounds: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) }
+    };
+  };
+  const firstVisible = (selectors) => {
+    for (const selector of selectors) {
+      const element = [...document.querySelectorAll(selector)].find(visible);
+      if (element) return element;
+    }
+    return null;
+  };
+  const firstText = (selectors, limit = 8000) => {
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      const text = compact(element?.innerText || element?.textContent || "", limit);
+      if (text) return text;
+    }
+    return "";
+  };
+  const composer = firstVisible([
+    "textarea[placeholder*='消息']",
+    "textarea[placeholder*='回复']",
+    "[contenteditable='true'][role='textbox']",
+    "textarea",
+    "[contenteditable='true']"
+  ]);
+  const composerValue = composer
+    ? compact("value" in composer ? composer.value : composer.innerText || composer.textContent || "", 1200)
+    : "";
+
+  // Use one message-container family at a time. Combining broad selectors
+  // groups parent bubbles with their content descendants and destroys both
+  // chronological order and occurrence counts used for send verification.
+  const primaryMessageSelectors = [
+    "[data-message-id]",
+    "[data-msg-id]",
+    "[data-messageid]",
+    ".message-item",
+    ".chat-message",
+    ".chat-record > li",
+    "[class*='message-item']:not([class*='content'])"
+  ];
+  const fallbackMessageSelectors = [
+    "[class*='message-content']",
+    "[class*='bubble-content']",
+    "[class*='bubble']"
+  ];
+  const messageRoots = [
+    "[data-message-id]",
+    "[data-msg-id]",
+    "[data-messageid]",
+    ".message-item",
+    ".chat-message",
+    ".chat-record > li"
+  ].join(",");
+  const visibleFor = (selector) => [...document.querySelectorAll(selector)].filter(visible);
+  let messageElements = [];
+  for (const selector of [...primaryMessageSelectors, ...fallbackMessageSelectors]) {
+    const rawCandidates = visibleFor(selector);
+    const candidates = fallbackMessageSelectors.includes(selector)
+      ? rawCandidates.filter((element) => !rawCandidates.some((other) => other !== element && element.contains(other)))
+      : rawCandidates;
+    if (!candidates.length) continue;
+    messageElements = [...new Set(candidates.map((element) => element.closest(messageRoots) || element))]
+      .filter(visible)
+      .sort((left, right) => {
+        if (left === right) return 0;
+        return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+      });
+    break;
+  }
+
+  const chatRoot = firstVisible([
+    ".chat-conversation",
+    ".chat-record",
+    "[class*='message-list']",
+    "[class*='chat-content']"
+  ]);
+  const chatRect = chatRoot?.getBoundingClientRect();
+  const stableMessageId = (element) => {
+    for (const attr of ["data-message-id", "data-msg-id", "data-messageid"]) {
+      const value = element.getAttribute(attr);
+      if (value) return { id: `${attr}:${value}`, source: "attribute" };
+    }
+    if (element.id) return { id: `id:${element.id}`, source: "element-id" };
+    return { id: `selector:${selectorFor(element)}`, source: "selector" };
+  };
+  const messageText = (element) => {
+    const content = [
+      ".message-content",
+      "[class*='message-content']",
+      ".bubble-content",
+      "[class*='bubble-content']"
+    ].map((selector) => element.querySelector(selector)).find((candidate) => candidate && visible(candidate));
+    return compact(content?.innerText || content?.textContent || element.innerText || element.textContent || "", 1200);
+  };
+  const messageFrom = (element) => {
+    const roleElement = element.closest("[data-from], [data-direction], [data-owner]") || element;
+    const explicitRole = compact([
+      roleElement.getAttribute("data-from"),
+      roleElement.getAttribute("data-direction"),
+      roleElement.getAttribute("data-owner")
+    ].filter(Boolean).join(" "), 240);
+    if (/candidate|self|mine|my(?:-|_|\b)|right|sent|outgoing|from-me/i.test(explicitRole)) return "candidate";
+    if (/recruiter|boss|other|left|received|incoming|from-other/i.test(explicitRole)) return "recruiter";
+    const roleHint = compact([
+      roleElement.getAttribute("aria-label"),
+      String(roleElement.className || ""),
+      String(element.parentElement?.className || "")
+    ].filter(Boolean).join(" "), 600);
+    if (/candidate|self|mine|my(?:-|_|\b)|right|sent|outgoing|from-me/i.test(roleHint)) return "candidate";
+    if (/recruiter|other|left|received|incoming|from-other|friend/i.test(roleHint)) return "recruiter";
+    const rect = element.getBoundingClientRect();
+    const center = rect.left + rect.width / 2;
+    const conversationCenter = chatRect ? chatRect.left + chatRect.width / 2 : innerWidth / 2;
+    return center > conversationCenter ? "candidate" : "recruiter";
+  };
+
+  const records = messageElements.flatMap((element) => {
+    const text = messageText(element);
+    if (!text) return [];
+    const identity = stableMessageId(element);
+    return [{ element, id: identity.id, idSource: identity.source, from: messageFrom(element), text }];
+  });
+  const deduped = [];
+  for (const record of records) {
+    const duplicate = deduped.some((existing) => {
+      if (existing.id === record.id) return true;
+      const nested = existing.element.contains(record.element) || record.element.contains(existing.element);
+      if (!nested || existing.from !== record.from) return false;
+      return existing.text === record.text
+        || existing.text.includes(record.text)
+        || record.text.includes(existing.text);
+    });
+    if (!duplicate) deduped.push(record);
+  }
+  const messages = deduped.slice(-30).map(({ id, idSource, from, text }) => ({ id, idSource, from, text }));
+  const transcript = messages.length ? "" : firstText([
+    ".chat-conversation",
+    ".chat-record",
+    "[class*='chat-content']"
+  ], 8000);
+
+  const selectedConversation = firstVisible([
+    "[data-conversation-id][aria-selected='true']",
+    "[data-conversation-id].active",
+    "[data-chat-id][aria-selected='true']",
+    "[data-chat-id].active",
+    "[data-boss-id][aria-selected='true']",
+    "[data-boss-id].active",
+    "[class*='chat-item'][class*='active']",
+    "[class*='conversation'][class*='active']"
+  ]);
+  let conversationId = "";
+  let conversationIdSource = "";
+  for (const attr of ["data-conversation-id", "data-chat-id", "data-boss-id", "data-friend-id"]) {
+    const value = selectedConversation?.getAttribute(attr);
+    if (!value) continue;
+    conversationId = compact(value, 240);
+    conversationIdSource = attr;
+    break;
+  }
+  if (!conversationId) {
+    try {
+      const chatUrl = new URL(location.href);
+      for (const key of ["conversationId", "chatId", "bossId", "encryptBossId", "friendId", "securityId"]) {
+        const value = chatUrl.searchParams.get(key);
+        if (!value) continue;
+        conversationId = compact(value, 240);
+        conversationIdSource = `query:${key}`;
+        break;
+      }
+    } catch {
+      // The visible recruiter/job identity remains available as a fallback.
+    }
+  }
+
+  return {
+    recruiter: firstText([".chat-info .name", ".user-name", "[class*='chat'] [class*='name']"], 160),
+    jobTitle: firstText([".chat-job", ".job-name", "[class*='job-title']"], 180),
+    company: firstText([".company-name", "[class*='company-name']"], 180),
+    conversationId,
+    conversationIdSource,
+    messages,
+    transcript,
+    composer: composer ? {
+      selector: selectorFor(composer),
+      tag: composer.tagName.toLowerCase(),
+      valuePreview: composerValue,
+      ...geometry(composer)
+    } : null
+  };
+}
+
 function bossInspectPage() {
   const visible = (element) => {
     const style = getComputedStyle(element);
@@ -151,35 +350,7 @@ function bossInspectPage() {
 
   let chat;
   if (pageType === "chat") {
-    const composer = firstElement(["textarea[placeholder*='消息']", "textarea", "[contenteditable='true']"]);
-    const composerRect = composer?.getBoundingClientRect();
-    const messageSelectors = [".message-item", ".chat-message", ".chat-record li", "[class*='message-item']", "[class*='message-content']", "[class*='bubble']"];
-    const messageElements = [...new Set(messageSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]))].filter(visible);
-    const rawMessages = messageElements.slice(-30).flatMap((element) => {
-      const text = compact(element.innerText || element.textContent || "", 1200);
-      if (!text) return [];
-      const className = String(element.className || "");
-      const rect = element.getBoundingClientRect();
-      const mine = /self|mine|my-|right|sent|send/i.test(className) || rect.left > innerWidth * 0.48;
-      return [{ from: mine ? "candidate" : "recruiter", text }];
-    });
-    const messages = rawMessages.filter((message, index) => index === 0 || message.text !== rawMessages[index - 1].text);
-    if (!messages.length) {
-      const transcript = firstText([".chat-conversation", ".chat-record", "[class*='chat-content']"], 8000);
-      if (transcript) messages.push({ from: "recruiter", text: transcript });
-    }
-    chat = {
-      recruiter: firstText([".chat-info .name", ".user-name", "[class*='chat'] [class*='name']"], 160),
-      jobTitle: firstText([".chat-job", ".job-name", "[class*='job-title']"], 180),
-      company: firstText([".company-name", "[class*='company-name']"], 180),
-      messages,
-      composer: composer ? {
-        selector: selectorFor(composer),
-        tag: composer.tagName.toLowerCase(),
-        point: { x: Math.round(composerRect.left + composerRect.width / 2), y: Math.round(composerRect.top + composerRect.height / 2) },
-        bounds: { x: Math.round(composerRect.left), y: Math.round(composerRect.top), width: Math.round(composerRect.width), height: Math.round(composerRect.height) }
-      } : null
-    };
+    chat = jobdeckBossChatSnapshot({ compact, visible, selectorFor });
   }
 
   let resume;
@@ -448,7 +619,9 @@ function bossInspectLite() {
     url: selectedCard?.url || location.href
   } : null;
 
-  const composer = [...document.querySelectorAll("textarea, [contenteditable='true']")].find(visible);
+  const chat = pageType === "chat"
+    ? jobdeckBossChatSnapshot({ compact, visible, selectorFor })
+    : null;
   const links = jobCards.map((card) => ({
     href: card.url, label: card.title, context: card.context, selector: card.selector, point: card.point, bounds: card.bounds
   }));
@@ -468,7 +641,7 @@ function bossInspectLite() {
       activeExpectation: expectationElements.find((item) => item.selected) || null,
       locationFilter,
       locationOptions: locationElements,
-      chat: composer ? { composer: { selector: selectorFor(composer), tag: composer.tagName.toLowerCase(), ...geometry(composer) } } : null,
+      chat,
       resume: null
     }
   });

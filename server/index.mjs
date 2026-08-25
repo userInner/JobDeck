@@ -15,7 +15,11 @@ import { buildResumeWritePlan } from "./resume-plan.mjs";
 import { bossSearchUrl, buildBossExpectationPlans } from "./search-plan.mjs";
 import { StarRewardError, StarRewardService } from "./star-rewards.mjs";
 import { Sub2APIClient, Sub2APIError } from "./sub2api-client.mjs";
-import { TenantRuntimeManager } from "./tenant-runtime.mjs";
+import {
+  jobdeckAuthHasScope,
+  jobdeckDeviceRequestScope,
+  TenantRuntimeManager
+} from "./tenant-runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const app = express();
@@ -176,9 +180,20 @@ app.post("/api/rewards/github-star/screenshot", rateLimit("star-screenshot", 5, 
   } catch (error) { accountError(res, error); }
 });
 
+const tenantAuthMiddleware = tenantRuntime.middleware();
 app.use("/api", (req, res, next) => {
   if (req.path === "/health") return next();
-  tenantRuntime.middleware()(req, res, next);
+  return tenantAuthMiddleware(req, res, () => {
+    if (req.jobdeckAuth?.kind !== "device") return next();
+    const requiredScope = jobdeckDeviceRequestScope(req.method, req.path);
+    if (!requiredScope || !jobdeckAuthHasScope(req.jobdeckAuth, requiredScope)) {
+      return res.status(403).json({
+        error: "插件连接码只能访问浏览器求职执行接口，请在工作台登录后完成此操作",
+        code: "DEVICE_SCOPE_FORBIDDEN"
+      });
+    }
+    return next();
+  });
 });
 
 function statePayload() {
@@ -772,6 +787,8 @@ function sameJobUrl(left, right) {
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const DEFAULT_AUTO_APPLY_TARGET = 60;
+const PLAN_EMPTY_CONFIRMATIONS = 3;
+const PLAN_RETRY_COOLDOWN_MS = 60_000;
 
 function automaticApplicationTarget(value) {
   const requested = Number.parseInt(value, 10);
@@ -839,7 +856,7 @@ function bossTabPageHint(value) {
   return "other";
 }
 
-async function inspectBossPageFollowingTabs(tabId, preferredPageTypes = []) {
+async function inspectBossPageFollowingTabs(tabId, preferredPageTypes = [], acceptPage = null) {
   const tabs = await bridge.execute({ kind: "listTabs" });
   const bossTabs = tabs.filter((tab) => tab.id && isBossTabUrl(tab.url));
   const preferred = new Set(preferredPageTypes);
@@ -859,6 +876,7 @@ async function inspectBossPageFollowingTabs(tabId, preferredPageTypes = []) {
     try {
       const page = await bridge.execute({ kind: "inspect", tabId: tab.id });
       if (page?.adapter !== "boss-zhipin") continue;
+      if (acceptPage && !acceptPage(page, tab.id)) continue;
       const result = { page, tabId: tab.id };
       if (preferred.has(page.pageType)) {
         if (!tab.active) await bridge.execute({ kind: "activateTab", tabId: tab.id });
@@ -872,6 +890,62 @@ async function inspectBossPageFollowingTabs(tabId, preferredPageTypes = []) {
   if (fallback) return fallback;
   if (lastError) throw lastError;
   throw new Error("没有可用的 BOSS 标签页，可能已被页面跳转关闭");
+}
+
+function normalizedBossChatUrl(value) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    for (const key of ["_", "t", "ts", "timestamp", "from", "source", "ka"]) url.searchParams.delete(key);
+    url.searchParams.sort();
+    return url.toString();
+  } catch {
+    return String(value || "").trim();
+  }
+}
+
+function bossChatSession(page, tabId) {
+  const chat = page?.boss?.chat || {};
+  return {
+    tabId: Number.isInteger(tabId) && tabId > 0 ? tabId : null,
+    url: normalizedBossChatUrl(page?.url),
+    conversationId: String(chat.conversationId || "").trim(),
+    conversationIdSource: String(chat.conversationIdSource || "").trim(),
+    recruiter: String(chat.recruiter || "").trim(),
+    jobTitle: String(chat.jobTitle || "").trim(),
+    company: String(chat.company || "").trim()
+  };
+}
+
+function bossChatSessionMatches(page, binding, tabId = null) {
+  if (!binding || page?.adapter !== "boss-zhipin" || page?.pageType !== "chat") return false;
+  if (binding.tabId && Number(tabId) !== Number(binding.tabId)) return false;
+  if (binding.url && normalizedBossChatUrl(page?.url) !== binding.url) return false;
+  const chat = page?.boss?.chat || {};
+  if (binding.conversationId) return String(chat.conversationId || "").trim() === binding.conversationId;
+  const readable = [
+    [binding.recruiter, chat.recruiter],
+    [binding.jobTitle, chat.jobTitle],
+    [binding.company, chat.company]
+  ].filter(([expected]) => normalizedResumeText(expected));
+  if (!readable.length) return false;
+  return readable.every(([expected, actual]) => {
+    const left = normalizedResumeText(expected);
+    const right = normalizedResumeText(actual);
+    return right && (left.includes(right) || right.includes(left));
+  });
+}
+
+async function waitForBoundBossChat(runId, binding, predicate, description, attempts = 10) {
+  if (!binding?.tabId) throw new Error(`${description}缺少会话标签页身份，无法安全恢复`);
+  const page = await waitForBossPage(
+    runId,
+    (value) => bossChatSessionMatches(value, binding, binding.tabId) && predicate(value),
+    description,
+    attempts,
+    binding.tabId
+  );
+  return { page, tabId: binding.tabId };
 }
 
 async function waitForBossPageFollowingTabs(runId, predicate, description, attempts, tabId, preferredPageTypes = []) {
@@ -954,8 +1028,7 @@ async function waitForStableBossLocation(runId, tabId, desired, attempts = 14, r
     if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
     const matches = lastPage?.adapter === "boss-zhipin"
       && lastPage?.pageType === "job-list"
-      && lastPage?.boss?.locationFilter?.label === desired
-      && Boolean(lastPage?.boss?.jobCards?.length);
+      && lastPage?.boss?.locationFilter?.label === desired;
     stableSamples = matches ? stableSamples + 1 : 0;
     if (stableSamples >= requiredStableSamples) return lastPage;
   }
@@ -980,9 +1053,41 @@ function bossExpectationContextMatches(page, expectationLabel, desiredLocation) 
   const visibleLocation = String(page?.boss?.locationFilter?.label || "").trim();
   return page?.adapter === "boss-zhipin"
     && page?.pageType === "job-list"
-    && Boolean(page?.boss?.jobCards?.length)
     && active?.label === expectationLabel
     && (!desiredLocation || visibleLocation === desiredLocation);
+}
+
+function currentBossRestoreContext(options = {}) {
+  const context = store.state.workflow.autopilot.goalContext || {};
+  return {
+    expectationLabel: String(options.expectationLabel || context.activeExpectation || "").trim(),
+    desiredLocation: String(options.desiredLocation || context.activeLocation || "").trim()
+  };
+}
+
+async function ensureBossRestoredListContext(runId, tabId, page, options = {}) {
+  let expected = currentBossRestoreContext(options);
+  let current = page;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (expected.expectationLabel && bossExpectationContextMatches(current, expected.expectationLabel, expected.desiredLocation)) {
+      return { page: current, tabId };
+    }
+    await sleep(attempt === 0 ? 350 : 250);
+    current = await bridge.execute({ kind: "inspect", tabId }).catch(() => current);
+    if (!expected.expectationLabel) {
+      const active = String(current?.boss?.activeExpectation?.label || "").trim();
+      const location = String(current?.boss?.locationFilter?.label || "").trim();
+      if (active) expected = { expectationLabel: active, desiredLocation: location };
+    }
+  }
+  if (!expected.expectationLabel) {
+    throw new Error("返回职位列表后未识别到当前求职期望；已停止而不是在未知城市继续");
+  }
+  const opened = await openBossJobList({ expectationLabel: expected.expectationLabel, tabId, runId, forceExpectation: false });
+  if (!bossExpectationContextMatches(opened.page, expected.expectationLabel, expected.desiredLocation || opened.effectiveLocation)) {
+    throw new Error(`职位列表上下文恢复失败：需要 ${expected.expectationLabel} / ${expected.desiredLocation || opened.effectiveLocation}`);
+  }
+  return { page: opened.page, tabId: opened.tabId };
 }
 
 async function waitForStableBossExpectation(runId, tabId, expectationLabel, desiredLocation, attempts = 16, requiredStableSamples = 3) {
@@ -1092,13 +1197,19 @@ async function waitForBossList(runId, tabId, description, attempts = 20) {
   );
 }
 
-async function restoreBossListAfterContact(runId, tabId, job) {
+async function restoreBossListAfterContact(runId, tabId, job, { contacted = true, expectationLabel = "", desiredLocation = "" } = {}) {
   let current = await inspectBossPageFollowingTabs(tabId, ["job-list"]).catch(() => null);
   let page = current?.page || null;
   tabId = current?.tabId || tabId;
-  if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return { page, tabId };
+  if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") {
+    return ensureBossRestoredListContext(runId, tabId, page, { expectationLabel, desiredLocation });
+  }
 
-  setAutopilot({ message: `已联系 ${job.company}，Computer Use 正在返回职位列表` });
+  setAutopilot({
+    message: contacted
+      ? `已联系 ${job.company}，Computer Use 正在返回职位列表`
+      : `已完成 ${job.company} / ${job.title} 的判断，Computer Use 正在返回职位列表`
+  });
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (!autopilotActive(runId)) throw new Error("托管投递已停止");
     const returnControl = [
@@ -1120,22 +1231,37 @@ async function restoreBossListAfterContact(runId, tabId, job) {
     tabId = current?.tabId || tabId;
     const verification = verificationReason(page);
     if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
-    if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return { page, tabId };
+    if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") {
+      return ensureBossRestoredListContext(runId, tabId, page, { expectationLabel, desiredLocation });
+    }
   }
-  throw new Error(`${job.company} / ${job.title} 已完成沟通，但 Computer Use 连续尝试后仍无法返回职位列表`);
+  throw new Error(`${job.company} / ${job.title} ${contacted ? "已完成沟通" : "已完成判断"}，但 Computer Use 连续尝试后仍无法返回职位列表`);
 }
 
 function pageJobUrls(page) {
   return jobCandidatesFromPage(page).map((candidate) => candidate.url).filter(Boolean);
 }
 
+function bossResultFingerprint(page) {
+  return [
+    page?.url || "",
+    page?.boss?.activeExpectation?.label || "",
+    page?.boss?.locationFilter?.label || "",
+    ...pageJobUrls(page)
+  ].join("|");
+}
+
 async function advanceBossJobResults(runId, tabId, seenUrls) {
   let page = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
   if (!page) page = await waitForBossList(runId, tabId, "BOSS 职位列表", 8);
-  if (page?.pageType !== "job-list") return null;
+  if (page?.pageType !== "job-list") {
+    return { page: null, advanced: false, endConfirmed: false, fingerprint: bossResultFingerprint(page) };
+  }
 
   const hasNewJob = (value) => pageJobUrls(value).some((url) => !seenUrls.has(url));
-  if (hasNewJob(page)) return page;
+  if (hasNewJob(page)) {
+    return { page, advanced: false, endConfirmed: false, fingerprint: bossResultFingerprint(page) };
+  }
 
   let unchanged = 0;
   let previousFingerprint = pageJobUrls(page).join("|");
@@ -1158,23 +1284,29 @@ async function advanceBossJobResults(runId, tabId, seenUrls) {
     if (!page) continue;
     const verification = verificationReason(page);
     if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
-    if (hasNewJob(page)) return page;
+    if (hasNewJob(page)) {
+      return { page, advanced: true, endConfirmed: false, fingerprint: bossResultFingerprint(page) };
+    }
     const fingerprint = pageJobUrls(page).join("|");
     unchanged = fingerprint === previousFingerprint ? unchanged + 1 : 0;
     previousFingerprint = fingerprint;
   }
 
   const next = findPageControl(page, /^(?:下一页|下页|Next|›|»)$/i, ["button", "a"]);
-  if (!next || next.disabled) return null;
+  if (!next || next.disabled) {
+    return { page: null, advanced: false, endConfirmed: true, fingerprint: bossResultFingerprint(page) };
+  }
   const point = centerOf(next, "下一页");
   await bridge.execute({ kind: "computerMove", tabId, x: point.x, y: point.y, reason: "自动找工作：移动到下一页" });
   await bridge.execute({ kind: "computerClick", tabId, x: point.x, y: point.y, reason: "自动找工作：打开下一页搜索结果" });
   for (let attempt = 0; attempt < 12; attempt += 1) {
     await sleep(attempt === 0 ? 900 : 500);
     page = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
-    if (page?.pageType === "job-list" && hasNewJob(page)) return page;
+    if (page?.pageType === "job-list" && hasNewJob(page)) {
+      return { page, advanced: true, endConfirmed: false, fingerprint: bossResultFingerprint(page) };
+    }
   }
-  return null;
+  return { page: null, advanced: true, endConfirmed: true, fingerprint: bossResultFingerprint(page) };
 }
 
 async function openBossJobList({ expectationLabel = "", tabId = null, runId = null, attempts = 20, forceExpectation = false } = {}) {
@@ -1194,7 +1326,7 @@ async function openBossJobList({ expectationLabel = "", tabId = null, runId = nu
     page,
     tabId: tab.id,
     expectation: selected.expectation,
-    effectiveLocation: selected.expectation.location,
+    effectiveLocation: expectedBossLocation(selected.expectation),
     feedKey: selected.expectation.label
   };
 }
@@ -1315,15 +1447,15 @@ async function recoverBossListAfterCandidateError(runId, tabId, plan, candidate)
   tabId = current?.tabId || tabId;
   if (page?.adapter !== "boss-zhipin" || page?.pageType !== "job-list") {
     try {
-      const restored = await restoreBossListAfterContact(runId, tabId, candidate);
+      const restored = await restoreBossListAfterContact(runId, tabId, candidate, { contacted: false });
       page = restored?.page || page;
       tabId = restored?.tabId || tabId;
     } catch (error) {
       if (fatalAutopilotError(error)) throw error;
     }
   }
-  setAutopilot({ message: `正在重新点击 BOSS 求职期望 ${plan.expectationLabel}，确认期望城市后再继续` });
-  return openBossJobList({ ...plan, tabId, runId, forceExpectation: true });
+  setAutopilot({ message: `正在恢复 BOSS 求职期望 ${plan.expectationLabel} 的职位列表并重新观察上下文` });
+  return openBossJobList({ ...plan, tabId, runId, forceExpectation: false });
 }
 
 function upsertDetailedJob(page, preferredId, preferredUrl = "") {
@@ -1362,9 +1494,109 @@ function bossComposerFromPage(page) {
     || (page?.interactives || []).find((item) => item.tag === "textarea" && !item.disabled);
 }
 
+function normalizedBossMessageText(value) {
+  return String(value || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function candidateOutboundMessages(page) {
+  const messages = page?.boss?.chat?.messages;
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter((message) => message?.from === "candidate" && normalizedBossMessageText(message.text))
+    .map((message) => ({
+      id: String(message.id || ""),
+      idSource: String(message.idSource || ""),
+      text: normalizedBossMessageText(message.text)
+    }));
+}
+
+function reliableBossMessageId(message) {
+  return Boolean(message?.id) && ["attribute", "element-id"].includes(message.idSource);
+}
+
+function outboundGreetingEvidence(page, greeting) {
+  const probe = normalizedBossMessageText(greeting);
+  const messages = candidateOutboundMessages(page);
+  const matching = messages.filter((message) => {
+    const text = normalizedBossMessageText(message.text);
+    return probe && (text.includes(probe) || (text.length >= Math.min(40, probe.length) && probe.includes(text)));
+  });
+  return {
+    outboundCount: messages.length,
+    matchingCount: matching.length,
+    messageIds: messages.map((message) => message.id).filter(Boolean),
+    matchingIds: matching.map((message) => message.id).filter(Boolean),
+    stableMessageIds: messages.filter(reliableBossMessageId).map((message) => message.id),
+    matchingStableIds: matching.filter(reliableBossMessageId).map((message) => message.id)
+  };
+}
+
+function bossComposerValue(page) {
+  return normalizedBossMessageText(
+    page?.boss?.chat?.composer?.valuePreview
+    ?? page?.boss?.chat?.composer?.value
+    ?? ""
+  );
+}
+
+function bossChatMatchesJob(page, job) {
+  const chat = page?.boss?.chat || {};
+  const readable = [
+    [chat.jobTitle, job.title],
+    [chat.company, job.company]
+  ].filter(([actual, expected]) => normalizedResumeText(actual) && normalizedResumeText(expected));
+  // A send receipt is only useful when the visible chat can be tied back to
+  // the selected job. Missing identity is ambiguous, and any visible
+  // contradiction must fail verification rather than being ignored.
+  if (!readable.length) return false;
+  return readable.every(([actual, expected]) => {
+    const left = normalizedResumeText(actual);
+    const right = normalizedResumeText(expected);
+    return left.includes(right) || right.includes(left);
+  });
+}
+
+function bossSendWasVerified(before, page, greeting, job, chatSession = null, tabId = null) {
+  if (page?.adapter !== "boss-zhipin" || page?.pageType !== "chat") return false;
+  if (chatSession && !bossChatSessionMatches(page, chatSession, tabId)) return false;
+  if (!Array.isArray(page?.boss?.chat?.messages) || !bossChatMatchesJob(page, job)) return false;
+  if (bossComposerValue(page)) return false;
+  const after = outboundGreetingEvidence(page, greeting);
+  const baselineIds = new Set(before?.stableMessageIds || []);
+  const hasNewMatchingId = after.matchingStableIds.some((id) => !baselineIds.has(id));
+  const hasNewMatchingOccurrence = after.outboundCount > Number(before?.outboundCount || 0)
+    && after.matchingCount > Number(before?.matchingCount || 0);
+  return hasNewMatchingId || hasNewMatchingOccurrence;
+}
+
 const SAFE_BOSS_TRANSITION = /^(?:继续沟通|去沟通|进入沟通|打开聊天|留在此页|返回职位|关闭|取消)$/i;
 
-async function adaptiveBossComposer(runId, tabId, job) {
+function initializeBossContactAttempt(jobId) {
+  patchAutopilotGoalContext({ contactAttemptJobId: jobId, contactAttempt: 0 });
+  return 0;
+}
+
+function reserveNextBossContactAttempt(jobId) {
+  return store.update((state) => {
+    const context = state.workflow.autopilot.goalContext || {};
+    const previous = context.contactAttemptJobId === jobId
+      ? Math.max(0, Math.trunc(Number(context.contactAttempt) || 0))
+      : 0;
+    const next = previous + 1;
+    state.workflow.autopilot.goalContext = {
+      ...context,
+      contactAttemptJobId: jobId,
+      contactAttempt: next
+    };
+    state.workflow.updatedAt = new Date().toISOString();
+    return next;
+  });
+}
+
+async function adaptiveBossComposer(runId, tabId, job, { contactOperationId = "" } = {}) {
   const attempts = new Map();
   const trace = [];
   let platformGreetingObserved = false;
@@ -1373,7 +1605,11 @@ async function adaptiveBossComposer(runId, tabId, job) {
     if (!autopilotActive(runId)) throw new Error("托管投递已停止");
     let current;
     try {
-      current = await inspectBossPageFollowingTabs(tabId, ["chat"]);
+      current = await inspectBossPageFollowingTabs(
+        tabId,
+        ["chat", "job-detail", "job-list"],
+        (candidatePage) => bossChatMatchesJob(candidatePage, job) || bossJobDetailMatches(candidatePage, job)
+      );
     } catch (error) {
       if (fatalAutopilotError(error)) throw error;
       trace.push(`第${turn}步：等待 BOSS 新标签页（${error.message}）`);
@@ -1437,12 +1673,27 @@ async function adaptiveBossComposer(runId, tabId, job) {
 
     if (next) {
       const point = centerOf(next, next.label || "中间页面操作");
+      const isContactRetry = Boolean(contactOperationId)
+        && /^(?:立即沟通|立即申请|投递简历|申请职位)$/i.test(next.label || "");
+      const operationAttempt = isContactRetry
+        ? reserveNextBossContactAttempt(job.id)
+        : undefined;
       attempts.set(next.selector, (attempts.get(next.selector) || 0) + 1);
       trace.push(`第${turn}步：${source} → ${next.label}`);
       setAutopilot({ message: `智能规划第 ${turn} 步：${next.label}（${source}）` });
       await bridge.execute({ kind: "computerMove", tabId, x: point.x, y: point.y, reason: `智能规划：移动到 ${next.label}` });
       await sleep(160);
-      await bridge.execute({ kind: "computerClick", tabId, x: point.x, y: point.y, reason: `智能规划：点击 ${next.label}` });
+      await bridge.execute({
+        kind: "computerClick",
+        tabId,
+        x: point.x,
+        y: point.y,
+        operationId: contactOperationId && /^(?:立即沟通|立即申请|投递简历|申请职位)$/i.test(next.label || "")
+          ? contactOperationId
+          : undefined,
+        operationAttempt,
+        reason: `智能规划：点击 ${next.label}`
+      });
       await sleep(650);
       continue;
     }
@@ -1457,63 +1708,264 @@ async function adaptiveBossComposer(runId, tabId, job) {
   throw new Error(`${job.company} / ${job.title}：${prefix}尝试记录：${trace.slice(-5).join("；")}`);
 }
 
-function recordBossJobSent(job) {
-  store.update((state) => {
-    job.status = "sent";
-    job.sentAt = new Date().toISOString();
-    job.sentMode = "tailored";
-    const batchItem = state.workflow.batch.find((item) => item.jobId === job.id);
-    if (batchItem) batchItem.status = "sent";
+function recordBossJobSent(job, receipt = {}) {
+  let newlyRecorded = false;
+  const sent = store.update((state) => {
+    const storedJob = state.jobs.find((entry) => entry.id === job.id) || job;
+    const alreadyRecorded = Boolean(storedJob.sentAt) || ["sent", "replied", "interview"].includes(storedJob.status);
+    if (!alreadyRecorded) {
+      newlyRecorded = true;
+      storedJob.status = "sent";
+      storedJob.sentAt = new Date().toISOString();
+      storedJob.sentMode = "tailored";
+      storedJob.sentReceipt = receipt.receipt || `${state.workflow.autopilot.runId || "run"}:${job.id}`;
+      storedJob.deliveryEvidence = receipt.evidence || null;
+      state.workflow.autopilot.sent = Number(state.workflow.autopilot.sent || 0) + 1;
+      const batchItem = state.workflow.batch.find((item) => item.jobId === job.id);
+      if (batchItem) batchItem.status = "sent";
+    }
+    state.workflow.autopilot.message = `已验证发送定制招呼：${job.company} / ${job.title}`;
+    state.workflow.updatedAt = new Date().toISOString();
+    return Number(state.workflow.autopilot.sent || 0);
   });
-  const sent = store.state.workflow.autopilot.sent + 1;
   const message = `已验证发送定制招呼：${job.company} / ${job.title}`;
-  setAutopilot({ sent, message });
-  store.addActivity(message);
+  if (newlyRecorded) store.addActivity(message);
+  return { newlyRecorded, sent };
+}
+
+function bossApplicationOperationId(runId, job, action) {
+  return `boss:${runId}:${job.id}:${action}`;
+}
+
+function bossSessionOperationId(baseOperationId, session) {
+  const identity = JSON.stringify([
+    session?.tabId || null,
+    session?.url || "",
+    session?.conversationId || "",
+    session?.recruiter || "",
+    session?.jobTitle || "",
+    session?.company || ""
+  ]);
+  const suffix = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 12);
+  return `${baseOperationId}:${suffix}`;
+}
+
+function bossComposerContainsGreeting(page, greeting) {
+  const value = bossComposerValue(page);
+  const probe = normalizedBossMessageText(greeting);
+  if (!value || !probe) return false;
+  return value === probe || value.includes(probe) || (value.length >= Math.min(40, probe.length) && probe.includes(value));
+}
+
+function recordAutopilotAction(action) {
+  return store.update((state) => {
+    const context = state.workflow.autopilot.goalContext || {};
+    const entries = Array.isArray(context.actionLedger) ? [...context.actionLedger] : [];
+    const id = String(action.id || "");
+    const index = id ? entries.findIndex((entry) => entry.id === id) : -1;
+    const entry = {
+      ...(index >= 0 ? entries[index] : {}),
+      ...action,
+      at: new Date().toISOString()
+    };
+    if (index >= 0) entries[index] = entry;
+    else entries.push(entry);
+    state.workflow.autopilot.goalContext = { ...context, actionLedger: entries.slice(-80) };
+    state.workflow.updatedAt = entry.at;
+    return entry;
+  });
 }
 
 async function applyCurrentBossJob(runId, tabId, job) {
-  let page = await bridge.execute({ kind: "inspect", tabId });
-  if (!page) {
-    page = await waitForBossPage(runId, (value) => value?.adapter === "boss-zhipin" && Boolean(value?.boss?.job?.description), "BOSS 职位详情", 8, tabId);
+  const persistedContext = store.state.workflow.autopilot.goalContext || {};
+  const persistedPhase = String(persistedContext.currentJobPhase || "");
+  const operationIds = {
+    contact: bossApplicationOperationId(runId, job, "contact"),
+    type: bossApplicationOperationId(runId, job, "type-greeting"),
+    send: bossApplicationOperationId(runId, job, "send-greeting")
+  };
+  if (["send-clicking", "send-clicked"].includes(persistedContext.currentJobPhase)) {
+    const pending = persistedContext.pendingSendEvidence;
+    if (!pending || pending.jobId !== job.id || !pending.chatSession?.tabId) {
+      throw unverifiedBossApplicationError(job, new Error("发送动作的恢复证据不完整，无法安全重发"));
+    }
+    let recovered = await waitForBoundBossChat(
+      runId,
+      pending.chatSession,
+      (value) => bossSendWasVerified(pending.before, value, job.greeting, job, pending.chatSession, pending.chatSession.tabId)
+        || bossComposerContainsGreeting(value, job.greeting),
+      "发送动作恢复现场",
+      10
+    );
+    if (!bossSendWasVerified(pending.before, recovered.page, job.greeting, job, pending.chatSession, recovered.tabId)) {
+      const send = findPageControl(recovered.page, /^(?:发送|发送消息|确定发送)$/i);
+      if (!send || !bossComposerContainsGreeting(recovered.page, job.greeting)) {
+        throw unverifiedBossApplicationError(job, new Error("上次发送动作结果仍不明确；为避免重复消息，未创建新的发送动作"));
+      }
+      const sendPoint = centerOf(send, "发送按钮");
+      await bridge.execute({ kind: "computerMove", tabId: recovered.tabId, x: sendPoint.x, y: sendPoint.y, reason: `恢复目标：移动到 ${job.company} 的发送按钮` });
+      await bridge.execute({
+        kind: "computerClick",
+        tabId: recovered.tabId,
+        x: sendPoint.x,
+        y: sendPoint.y,
+        operationId: pending.sendOperationId || operationIds.send,
+        reason: `恢复目标：确认 ${job.company} / ${job.title} 的同一条定制招呼发送动作`
+      });
+      patchAutopilotGoalContext({ currentJobPhase: "send-clicked", lastAction: "send-reconciled" });
+      recordAutopilotAction({ id: pending.sendOperationId || operationIds.send, kind: "send-greeting", jobId: job.id, status: "acknowledged" });
+      recovered = await waitForBoundBossChat(
+        runId,
+        pending.chatSession,
+        (value) => bossSendWasVerified(pending.before, value, job.greeting, job, pending.chatSession, pending.chatSession.tabId),
+        "消息发送结果",
+        10
+      );
+    }
+    patchAutopilotGoalContext({
+      tabId: recovered.tabId,
+      currentJobPhase: "verified",
+      pendingSendEvidence: null,
+      lastAction: "application-verified-after-recovery",
+      lastVerifiedAt: new Date().toISOString()
+    });
+    recordAutopilotAction({ id: pending.sendOperationId || operationIds.send, kind: "send-greeting", jobId: job.id, status: "verified" });
+    recordBossJobSent(job, { receipt: `${runId}:${job.id}`, evidence: { recovered: true } });
+    return restoreBossListAfterContact(runId, recovered.tabId, job);
   }
-  const contact = findPageControl(page, /^(?:立即沟通|继续沟通|立即申请|投递简历|申请职位)$/i);
-  if (!contact) throw new Error(`${job.company} / ${job.title}：未找到明确的沟通或投递按钮`);
-  const contactPoint = centerOf(contact, "沟通或投递按钮");
-  setAutopilot({ message: `目标 ${store.state.workflow.autopilot.sent}/${store.state.workflow.autopilot.targetApplications}；鼠标正在移向“${contact.label || "立即沟通"}”` });
-  await bridge.execute({ kind: "computerMove", tabId, x: contactPoint.x, y: contactPoint.y, reason: `已批准批次：移动到 ${job.company} 的沟通按钮` });
-  await sleep(180);
-  await bridge.execute({ kind: "computerClick", tabId, x: contactPoint.x, y: contactPoint.y, reason: `已批准批次：联系 ${job.company} 的 ${job.title}` });
-  setAutopilot({ message: `已点击“${contact.label || "立即沟通"}”，正在验证 BOSS 会话与定制消息输入框` });
-  await sleep(500);
-  const transition = await adaptiveBossComposer(runId, tabId, job);
-  tabId = transition.tabId;
-  page = transition.page;
-  const composer = transition.composer;
+
+  let page = null;
+  let composer = null;
+  const resumeBeforeSend = ["contact-clicking", "contact-clicked", "composer-ready", "typed"].includes(persistedPhase);
+  if (resumeBeforeSend) {
+    const resumed = await inspectBossPageFollowingTabs(
+      tabId,
+      ["chat", "job-detail", "job-list"],
+      (candidatePage) => bossChatMatchesJob(candidatePage, job) || bossJobDetailMatches(candidatePage, job)
+    );
+    tabId = resumed.tabId;
+    page = resumed.page;
+    composer = bossComposerFromPage(page);
+    if (!composer && ["contact-clicking", "contact-clicked"].includes(persistedPhase) && bossJobDetailMatches(page, job)) {
+      const contact = findPageControl(page, /^(?:立即沟通|继续沟通|立即申请|投递简历|申请职位)$/i);
+      if (!contact) throw unverifiedBossApplicationError(job, new Error("恢复时仍在原 JD，但沟通入口已不可识别"));
+      const contactPoint = centerOf(contact, "沟通或投递按钮");
+      const operationAttempt = reserveNextBossContactAttempt(job.id);
+      patchAutopilotGoalContext({ currentJobPhase: "contact-clicking", lastAction: "contact-reconciling" });
+      await bridge.execute({ kind: "computerMove", tabId, x: contactPoint.x, y: contactPoint.y, reason: `恢复目标：移动到 ${job.company} 的沟通按钮` });
+      await bridge.execute({
+        kind: "computerClick",
+        tabId,
+        x: contactPoint.x,
+        y: contactPoint.y,
+        operationId: operationIds.contact,
+        operationAttempt,
+        reason: `恢复目标：用同一操作确认 ${job.company} / ${job.title} 的沟通入口`
+      });
+      recordAutopilotAction({ id: operationIds.contact, kind: "open-contact", jobId: job.id, status: "acknowledged" });
+      patchAutopilotGoalContext({ currentJobPhase: "contact-clicked", lastAction: "contact-reconciled" });
+      await sleep(500);
+    }
+  }
+
+  if (!composer && !resumeBeforeSend) {
+    page = await bridge.execute({ kind: "inspect", tabId });
+    if (!page) {
+      page = await waitForBossPage(runId, (value) => value?.adapter === "boss-zhipin" && Boolean(value?.boss?.job?.description), "BOSS 职位详情", 8, tabId);
+    }
+    const contact = findPageControl(page, /^(?:立即沟通|继续沟通|立即申请|投递简历|申请职位)$/i);
+    if (!contact) throw new Error(`${job.company} / ${job.title}：未找到明确的沟通或投递按钮`);
+    const contactPoint = centerOf(contact, "沟通或投递按钮");
+    const operationAttempt = initializeBossContactAttempt(job.id);
+    patchAutopilotGoalContext({ currentJobPhase: "contact-clicking", lastAction: "contact-clicking" });
+    recordAutopilotAction({ id: operationIds.contact, kind: "open-contact", jobId: job.id, status: "planned" });
+    setAutopilot({ message: `目标 ${store.state.workflow.autopilot.sent}/${store.state.workflow.autopilot.targetApplications}；鼠标正在移向“${contact.label || "立即沟通"}”` });
+    await bridge.execute({ kind: "computerMove", tabId, x: contactPoint.x, y: contactPoint.y, reason: `已批准批次：移动到 ${job.company} 的沟通按钮` });
+    await sleep(180);
+    await bridge.execute({
+      kind: "computerClick",
+      tabId,
+      x: contactPoint.x,
+      y: contactPoint.y,
+      operationId: operationIds.contact,
+      operationAttempt,
+      reason: `已批准批次：联系 ${job.company} 的 ${job.title}`
+    });
+    recordAutopilotAction({ id: operationIds.contact, kind: "open-contact", jobId: job.id, status: "acknowledged" });
+    patchAutopilotGoalContext({ currentJobPhase: "contact-clicked", lastAction: "contact-clicked" });
+    setAutopilot({ message: `已点击“${contact.label || "立即沟通"}”，正在验证 BOSS 会话与定制消息输入框` });
+    await sleep(500);
+  }
+
+  if (!composer) {
+    const transition = await adaptiveBossComposer(runId, tabId, job, { contactOperationId: operationIds.contact });
+    tabId = transition.tabId;
+    page = transition.page;
+    composer = transition.composer;
+  }
   if (!composer) throw new Error(`${job.company} / ${job.title}：未找到沟通输入框`);
+  const reusablePending = persistedContext.pendingSendEvidence?.jobId === job.id
+    && persistedContext.pendingSendEvidence?.chatSession
+    && bossChatSessionMatches(page, persistedContext.pendingSendEvidence.chatSession, tabId)
+    ? persistedContext.pendingSendEvidence
+    : null;
+  const chatSession = reusablePending?.chatSession || bossChatSession(page, tabId);
+  if (!bossChatSessionMatches(page, chatSession, tabId)) {
+    throw unverifiedBossApplicationError(job, new Error("当前会话缺少可稳定核验的身份，未填写或发送消息"));
+  }
   const composerPoint = centerOf(composer, "沟通输入框");
-  await bridge.execute({ kind: "computerMove", tabId, x: composerPoint.x, y: composerPoint.y, reason: `已批准批次：移动到 ${job.company} 的沟通输入框` });
-  await bridge.execute({ kind: "computerClick", tabId, x: composerPoint.x, y: composerPoint.y, reason: `已批准批次：聚焦 ${job.company} 的沟通输入框` });
-  await bridge.execute({ kind: "computerType", tabId, value: job.greeting, replace: true, reason: `已批准批次：填写该 JD 的定制招呼语` });
+  // A persisted baseline is meaningful only inside the exact same bound chat
+  // session. If BOSS changed recruiter/session, sample a fresh baseline and
+  // use session-scoped operation ids so stale receipts cannot suppress the
+  // new visible typing/send action.
+  const before = reusablePending?.before || outboundGreetingEvidence(page, job.greeting);
+  const typeOperationId = reusablePending?.typeOperationId
+    || bossSessionOperationId(operationIds.type, chatSession);
+  const sendOperationId = reusablePending?.sendOperationId
+    || bossSessionOperationId(operationIds.send, chatSession);
+  const pendingSendEvidence = {
+    jobId: job.id,
+    greetingProbe: normalizedBossMessageText(job.greeting),
+    before,
+    chatSession,
+    typeOperationId,
+    sendOperationId,
+    capturedAt: reusablePending?.capturedAt || new Date().toISOString()
+  };
+  patchAutopilotGoalContext({ currentJobPhase: "composer-ready", pendingSendEvidence, lastAction: "composer-ready" });
+  recordAutopilotAction({ id: typeOperationId, kind: "type-greeting", jobId: job.id, status: "planned" });
+  if (!bossComposerContainsGreeting(page, job.greeting)) {
+    await bridge.execute({ kind: "computerMove", tabId, x: composerPoint.x, y: composerPoint.y, reason: `已批准批次：移动到 ${job.company} 的沟通输入框` });
+    await bridge.execute({ kind: "computerClick", tabId, x: composerPoint.x, y: composerPoint.y, reason: `已批准批次：聚焦 ${job.company} 的沟通输入框` });
+    await bridge.execute({
+      kind: "computerType",
+      tabId,
+      value: job.greeting,
+      replace: true,
+      operationId: typeOperationId,
+      reason: `已批准批次：填写该 JD 的定制招呼语`
+    });
+  }
+  recordAutopilotAction({ id: typeOperationId, kind: "type-greeting", jobId: job.id, status: "acknowledged" });
+  patchAutopilotGoalContext({ currentJobPhase: "typed", lastAction: "greeting-typed" });
   await sleep(500);
-  let current = await waitForBossPageFollowingTabs(
+  let current = await waitForBoundBossChat(
     runId,
-    (value) => value?.adapter === "boss-zhipin",
+    chatSession,
+    (value) => bossComposerContainsGreeting(value, job.greeting),
     "BOSS 沟通页面",
-    8,
-    tabId,
-    ["chat"]
+    8
   );
   page = current.page;
   tabId = current.tabId;
   let send = findPageControl(page, /^(?:发送|发送消息|确定发送)$/i);
   if (!send) {
-    current = await waitForBossPageFollowingTabs(
+    current = await waitForBoundBossChat(
       runId,
+      chatSession,
       (value) => Boolean(findPageControl(value, /^(?:发送|发送消息|确定发送)$/i)),
       "可用的消息发送按钮",
-      8,
-      tabId,
-      ["chat"]
+      8
     );
     page = current.page;
     tabId = current.tabId;
@@ -1521,18 +1973,43 @@ async function applyCurrentBossJob(runId, tabId, job) {
   }
   if (!send) throw new Error(`${job.company} / ${job.title}：未找到唯一的发送按钮，未自动发送`);
   const sendPoint = centerOf(send, "发送按钮");
+  patchAutopilotGoalContext({
+    currentJobPhase: "send-clicking",
+    pendingSendEvidence,
+    lastAction: "send-clicking"
+  });
+  recordAutopilotAction({ id: sendOperationId, kind: "send-greeting", jobId: job.id, status: "planned" });
   await bridge.execute({ kind: "computerMove", tabId, x: sendPoint.x, y: sendPoint.y, reason: `已批准批次：移动到 ${job.company} 的发送按钮` });
-  await bridge.execute({ kind: "computerClick", tabId, x: sendPoint.x, y: sendPoint.y, reason: `已批准批次：发送 ${job.company} / ${job.title} 的定制招呼语` });
-  await waitForBossPageFollowingTabs(
-    runId,
-    (value) => String(value.text || "").includes(job.greeting.slice(0, 24)),
-    "消息发送结果",
-    10,
+  await bridge.execute({
+    kind: "computerClick",
     tabId,
-    ["chat"]
+    x: sendPoint.x,
+    y: sendPoint.y,
+    operationId: sendOperationId,
+    reason: `已批准批次：发送 ${job.company} / ${job.title} 的定制招呼语`
+  });
+  recordAutopilotAction({ id: sendOperationId, kind: "send-greeting", jobId: job.id, status: "acknowledged" });
+  patchAutopilotGoalContext({ currentJobPhase: "send-clicked", lastAction: "send-clicked" });
+  const verified = await waitForBoundBossChat(
+    runId,
+    chatSession,
+    (value) => bossSendWasVerified(before, value, job.greeting, job, chatSession, chatSession.tabId),
+    "消息发送结果",
+    10
   );
-  recordBossJobSent(job);
-  return restoreBossListAfterContact(runId, tabId, job);
+  patchAutopilotGoalContext({
+    tabId: verified.tabId,
+    currentJobPhase: "verified",
+    pendingSendEvidence: null,
+    lastAction: "application-verified",
+    lastVerifiedAt: new Date().toISOString()
+  });
+  recordAutopilotAction({ id: sendOperationId, kind: "send-greeting", jobId: job.id, status: "verified" });
+  recordBossJobSent(job, {
+    receipt: `${runId}:${job.id}`,
+    evidence: outboundGreetingEvidence(verified.page, job.greeting)
+  });
+  return restoreBossListAfterContact(runId, verified.tabId, job);
 }
 
 function unverifiedBossApplicationError(job, error) {
@@ -1541,12 +2018,12 @@ function unverifiedBossApplicationError(job, error) {
   return wrapped;
 }
 
-function stopAutopilotWith(error, fallbackPhase = "autopilot-blocked") {
+function stopAutopilotWith(error, fallbackPhase = "autopilot-blocked", { preserveCurrentJob = false } = {}) {
   const stopped = /已停止/.test(error.message);
   setAutopilot({
     status: stopped ? "stopped" : "needs-attention",
     stage: stopped ? "stopped" : "blocked",
-    currentJobId: null,
+    currentJobId: preserveCurrentJob ? store.state.workflow.autopilot.currentJobId : null,
     message: error.message,
     completedAt: new Date().toISOString()
   });
@@ -1639,16 +2116,12 @@ function persistSearchCandidates(found) {
 }
 
 function candidateMatchesExpectedLocation(candidate, activeLocation = "") {
-  const expected = (activeLocation && activeLocation !== "全国"
-    ? [activeLocation]
-    : store.state.candidate.locations || [])
-    .map((item) => String(item || "").trim())
-    .filter(Boolean);
-  if (!expected.length) return true;
+  const expected = String(activeLocation || "").trim();
+  if (!expected || expected === "全国") return true;
   const haystack = `${candidate.location || ""} ${candidate.context || ""}`;
-  return expected.some((location) => location === "远程"
+  return expected === "远程"
     ? /远程|居家|remote/i.test(haystack)
-    : haystack.includes(location));
+    : haystack.includes(expected);
 }
 
 async function ensureAutopilotCandidateEvidence(runId) {
@@ -1674,179 +2147,32 @@ async function ensureAutopilotCandidateEvidence(runId) {
   setAutopilot({ message: "BOSS 在线简历证据已同步，准备进入职位列表" });
 }
 
-async function runAutomaticJobSearch(runId, targetApplications) {
-  try {
-    await verifyAutopilotProvider(runId);
-    await ensureAutopilotCandidateEvidence(runId);
-    const initialTab = await bridge.execute({ kind: "openBossJobs" });
-    let tabId = initialTab.id;
-    let initialPage = await waitForBossList(runId, tabId, "BOSS 职位列表", 20);
-    initialPage = await exposeBossListHeader(runId, tabId, initialPage);
-    const plans = buildBossExpectationPlans(initialPage?.boss?.expectationOptions || []);
-    if (!plans.length) {
-      throw new Error("没有识别到 BOSS 顶部已保存的求职期望。请先在 BOSS 添加求职期望，再启动自动找工作");
-    }
-    setAutopilot({ message: `已读取 ${plans.length} 个 BOSS 求职期望，直接按 BOSS 的岗位和城市开始查找` });
-    let inspectedCount = 0;
-    let discoveredCount = 0;
-    let addedCount = 0;
-    const seenUrls = new Set();
-    const discoveredUrls = new Set();
-    let plansWithoutProgress = 0;
-    let planIndex = 0;
-
-    while (store.state.workflow.autopilot.sent < targetApplications && plansWithoutProgress < plans.length) {
-      if (!autopilotActive(runId)) throw new Error("托管投递已停止");
-      const plan = plans[planIndex % plans.length];
-      const sentBeforePlan = store.state.workflow.autopilot.sent;
-      const inspectedBeforePlan = inspectedCount;
-      setAutopilot({
-        stage: "searching",
-        status: "running-search",
-        message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；Computer Use 正在处理 BOSS 求职期望 ${plan.expectationLabel}`
-      });
-
-      try {
-        const result = await openBossJobList({ ...plan, tabId, runId });
-        tabId = result.tabId;
-        let activeLocation = result.effectiveLocation;
-        let page = result.page;
-        while (page && store.state.workflow.autopilot.sent < targetApplications) {
-          // BOSS virtualizes and refreshes the result column whenever a detail
-          // is opened or a chat is closed. Process exactly one card from the
-          // latest snapshot, then observe the page again. Iterating a captured
-          // array of cards caused the runner to click a valid first JD and then
-          // silently skip the remaining stale entries.
-          const visible = jobCandidatesFromPage(page);
-          const fresh = visible.filter((candidate) => {
-            if (!candidate.url || seenUrls.has(candidate.url)) return false;
-            if (!candidateMatchesExpectedLocation(candidate, activeLocation)) return false;
-            const existing = store.state.jobs.find((job) => sameJobUrl(job.url, candidate.url));
-            return !["sent", "replied", "interview"].includes(existing?.status);
-          });
-          const persisted = persistSearchCandidates(fresh);
-          addedCount += persisted.addedCount;
-          for (const candidate of fresh) {
-            if (!discoveredUrls.has(candidate.url)) {
-              discoveredUrls.add(candidate.url);
-              discoveredCount += 1;
-            }
-          }
-          setAutopilot({ discovered: discoveredCount, status: "running-analysis", stage: "analyzing" });
-
-          const candidateId = persisted.candidateIds[0];
-          if (!candidateId) {
-            page = await advanceBossJobResults(runId, tabId, seenUrls);
-            continue;
-          }
-          if (!autopilotActive(runId)) throw new Error("托管投递已停止");
-          const candidate = store.state.jobs.find((job) => job.id === candidateId);
-          if (!candidate) {
-            page = await advanceBossJobResults(runId, tabId, seenUrls);
-            continue;
-          }
-          seenUrls.add(candidate.url);
-          let applicationAttempted = false;
-          try {
-            setAutopilot({ currentJobId: candidate.id, message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在查看 ${candidate.company} / ${candidate.title}` });
-            const detailPage = await selectBossJobCard(runId, tabId, candidate);
-            const job = upsertDetailedJob(detailPage, candidate.id, candidate.url);
-            if (!candidateMatchesExpectedLocation(job, activeLocation)) {
-              store.addActivity(`自动找工作跳过异地岗位：${job.company} / ${job.title}（${job.location || "地点未识别"}，当前期望 ${activeLocation}）`, "done");
-            } else {
-              const analysis = await analyzeForAutopilot(job, { matchOnly: true });
-              inspectedCount += 1;
-              setAutopilot({
-                analyzed: inspectedCount,
-                message: `${job.company} / ${job.title}：${analysis.matches ? "技术与岗位匹配，下一步将点击立即沟通" : `未进入“立即沟通”点击：${analysis.summary || analysis.hardGaps?.join("、") || "岗位方向不符"}`}`
-              });
-              if (analysis.matches === true && job.greeting) {
-                applicationAttempted = true;
-                const selected = store.state.workflow.autopilot.selected + 1;
-                setAutopilot({ selected, status: "running-apply", stage: "applying", message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在沟通 ${job.company} / ${job.title}` });
-                const application = await applyCurrentBossJob(runId, tabId, job);
-                tabId = application.tabId;
-                applicationAttempted = false;
-                setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已完成 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在重新选择 ${plan.expectationLabel} 并核对期望城市` });
-                const resumed = await openBossJobList({ ...plan, tabId, runId, forceExpectation: true });
-                page = resumed.page;
-                tabId = resumed.tabId;
-                activeLocation = resumed.effectiveLocation || activeLocation;
-                setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已恢复 ${plan.expectationLabel} / ${activeLocation}，继续寻找匹配岗位` });
-              } else {
-                store.addActivity(`未点击立即沟通：${job.company} / ${job.title}（${analysis.summary || analysis.hardGaps?.join("、") || "岗位存在明确硬性冲突"}）`, "done");
-              }
-            }
-          } catch (error) {
-            if (applicationAttempted && error?.code !== "BOSS_APPLY_NOT_VERIFIED") {
-              throw unverifiedBossApplicationError(candidate, error);
-            }
-            if (fatalAutopilotError(error)) throw error;
-            store.addActivity(`自动找工作当前岗位未完成：${candidate.company} / ${candidate.title}（${error.message}）`, "error");
-            try {
-              const recovered = await recoverBossListAfterCandidateError(runId, tabId, plan, candidate);
-              tabId = recovered.tabId;
-              page = recovered.page;
-            } catch (recoveryError) {
-              if (fatalAutopilotError(recoveryError)) throw recoveryError;
-              store.addActivity(`恢复职位列表失败，改试下一组求职期望：${recoveryError.message}`, "error");
-              page = null;
-            }
-          }
-          await sleep(900);
-          if (page?.pageType !== "job-list") {
-            page = await bridge.execute({ kind: "inspect", tabId }).catch(() => page);
-          }
-        }
-      } catch (error) {
-        if (fatalAutopilotError(error)) throw error;
-        store.addActivity(`BOSS 求职期望 ${plan.expectationLabel} 暂时跳过：${error.message}`, "error");
-      }
-
-      const progressed = inspectedCount > inspectedBeforePlan || store.state.workflow.autopilot.sent > sentBeforePlan;
-      plansWithoutProgress = progressed ? 0 : plansWithoutProgress + 1;
-      planIndex += 1;
-      await sleep(900);
-    }
-
-    store.update((state) => {
-      state.workflow.search.discovered += addedCount;
-      state.workflow.search.locations = [...new Set(plans.map((plan) => plan.location))];
-      state.workflow.search.queries = [...new Set(plans.map((plan) => plan.role))];
-    });
-    const sent = store.state.workflow.autopilot.sent;
-    if (sent < targetApplications) {
-      throw new Error(`目标尚未完成：已验证沟通 ${sent}/${targetApplications}；BOSS 已保存的求职期望暂未发现新的匹配岗位`);
-    }
-    setAutopilot({
-      status: "complete",
-      stage: "complete",
-      currentJobId: null,
-      message: `目标已完成：查看 ${inspectedCount} 个完整 JD，已验证沟通 ${sent}/${targetApplications}`,
-      completedAt: new Date().toISOString()
-    });
-    setWorkflow({ phase: "apply-complete", lastError: "" });
-    store.addActivity(`Computer Use 自动找工作目标完成：查看 ${inspectedCount} 个岗位，已验证沟通 ${sent}/${targetApplications}`);
-  } catch (error) {
-    stopAutopilotWith(error);
-  }
+function patchAutopilotGoalContext(patch) {
+  return store.update((state) => {
+    state.workflow.autopilot.goalContext = {
+      ...state.workflow.autopilot.goalContext,
+      ...patch
+    };
+    state.workflow.updatedAt = new Date().toISOString();
+    return state.workflow.autopilot.goalContext;
+  });
 }
 
-function startAutomaticJobSearch(requestedTarget) {
+function initializeAutomaticJobSearchGoal(requestedTarget) {
   const targetApplications = automaticApplicationTarget(requestedTarget);
   const runId = crypto.randomUUID();
   store.update((state) => {
-    state.workflow.phase = "analysis-running";
+    state.workflow.phase = "goal-running";
     state.workflow.lastError = "";
   });
   setAutopilot({
-    status: "running-search",
+    status: "running-goal",
     runId,
-    stage: "searching",
+    stage: "goal-active",
     autoApply: true,
     autoApplyLimit: targetApplications,
     targetApplications,
-    message: `目标 0/${targetApplications}；准备读取 BOSS 已保存的求职期望`,
+    message: `目标 0/${targetApplications}；Agent 将观察真实页面后决定下一步`,
     discovered: 0,
     analyzed: 0,
     selected: 0,
@@ -1854,13 +2180,500 @@ function startAutomaticJobSearch(requestedTarget) {
     currentJobId: null,
     rankedJobIds: [],
     selectedJobIds: [],
+    goalContext: {
+      version: 2,
+      providerReady: false,
+      evidenceReady: false,
+      tabId: null,
+      plans: [],
+      planIndex: 0,
+      activeExpectation: "",
+      activeLocation: "",
+      seenUrls: [],
+      discoveredUrls: [],
+      exhaustedPlanLabels: [],
+      exhaustedPlanKeys: [],
+      exhaustionAttempts: {},
+      planCooldowns: {},
+      attemptCounts: {},
+      actionLedger: [],
+      currentJobPhase: "",
+      contactAttemptJobId: null,
+      contactAttempt: 0,
+      pendingSendEvidence: null,
+      lastInspectedJobId: null,
+      lastAction: "initialized",
+      lastVerifiedAt: null
+    },
+    recoveryReason: "",
+    interruptedAt: null,
     stopRequested: false,
     startedAt: new Date().toISOString(),
     completedAt: null
   });
-  store.addActivity(`Computer Use 自动找工作启动：目标至少 ${targetApplications} 份，岗位与城市完全使用 BOSS 已保存的求职期望`);
-  queueMicrotask(() => runAutomaticJobSearch(runId, targetApplications));
+  store.addActivity(`目标驱动求职 Agent 启动：目标至少 ${targetApplications} 个已验证沟通；岗位和城市使用 BOSS 已保存的求职期望`);
   return { runId, targetApplications, source: "boss-expectations" };
+}
+
+function recoverableAutomaticJobSearchGoal(autopilot = store.state.workflow.autopilot || {}) {
+  const target = automaticApplicationTarget(autopilot.targetApplications || autopilot.autoApplyLimit);
+  const sent = Number(autopilot.sent || 0);
+  const status = String(autopilot.status || "");
+  const legacyRestartStop = status === "stopped"
+    && /服务曾中断，请重新授权一个批次/.test(String(autopilot.message || ""));
+  return Boolean(autopilot.runId)
+    && sent < target
+    && (status === "recoverable" || autopilot.recoveryReason === "server-restart" || legacyRestartStop);
+}
+
+function resumeOrInitializeAutomaticJobSearchGoal(requestedTarget) {
+  const previous = store.state.workflow.autopilot || {};
+  if (!recoverableAutomaticJobSearchGoal(previous)) {
+    return { ...initializeAutomaticJobSearchGoal(requestedTarget), resumed: false };
+  }
+
+  const targetApplications = automaticApplicationTarget(previous.targetApplications || previous.autoApplyLimit || requestedTarget);
+  const context = previous.goalContext || {};
+  const externalCheckpointPhases = new Set(["contact-clicking", "contact-clicked", "composer-ready", "typed", "send-clicking", "send-clicked"]);
+  const pendingJobId = String(context.pendingSendEvidence?.jobId || "").trim();
+  const recoveredJobId = pendingJobId || previous.currentJobId || null;
+  const requiresExternalReconciliation = Boolean(context.pendingSendEvidence)
+    || externalCheckpointPhases.has(String(context.currentJobPhase || ""));
+  const recoveredJob = recoveredJobId && store.state.jobs.find((job) => job.id === recoveredJobId);
+  if (requiresExternalReconciliation && (!recoveredJob || recoveredJob.analysis?.matches !== true || !recoveredJob.greeting)) {
+    throw new Error("服务中断前存在尚未核验的外部发送，但对应岗位或定制招呼证据不完整。为避免重复发送，任务保持可恢复状态，需要本人检查 BOSS 对话后再继续");
+  }
+
+  store.update((state) => {
+    state.workflow.phase = "goal-running";
+    state.workflow.lastError = "";
+  });
+  setAutopilot({
+    status: "running-goal",
+    stage: context.currentJobPhase || context.pendingSendEvidence ? "reconciling" : "goal-active",
+    autoApply: true,
+    autoApplyLimit: targetApplications,
+    targetApplications,
+    currentJobId: recoveredJobId,
+    stopRequested: false,
+    recoveryReason: "",
+    completedAt: null,
+    message: context.currentJobPhase || context.pendingSendEvidence
+      ? `正在恢复原目标 ${Number(previous.sent || 0)}/${targetApplications}；先核验中断前的当前岗位和外部发送结果，再决定是否继续`
+      : `正在恢复原目标 ${Number(previous.sent || 0)}/${targetApplications}；保留已有计划并从最近一次已验证进度继续`
+  });
+  store.addActivity(`目标驱动求职 Agent 恢复：沿用运行 ${previous.runId}，已验证沟通 ${Number(previous.sent || 0)}/${targetApplications}`);
+  return {
+    runId: previous.runId,
+    targetApplications,
+    source: "recovered-boss-expectations",
+    resumed: true
+  };
+}
+
+function activeAutopilotGoal() {
+  const autopilot = store.state.workflow.autopilot || {};
+  return autopilotActive(autopilot.runId) ? autopilot : null;
+}
+
+function nextAutopilotPlan(context) {
+  context ||= {};
+  const plans = Array.isArray(context.plans) ? context.plans : [];
+  if (!plans.length) return null;
+  const cooldowns = context.planCooldowns && typeof context.planCooldowns === "object"
+    ? context.planCooldowns
+    : {};
+  const now = Date.now();
+  for (let offset = 0; offset < plans.length; offset += 1) {
+    const index = ((Number(context.planIndex) || 0) + offset) % plans.length;
+    const plan = plans[index];
+    const retryAt = Number(cooldowns[autopilotPlanKey(plan, index)] || 0);
+    if (!retryAt || retryAt <= now) return { plan, index, cooldownWaitMs: 0 };
+  }
+  const earliest = plans
+    .map((plan, index) => ({ plan, index, retryAt: Number(cooldowns[autopilotPlanKey(plan, index)] || 0) }))
+    .sort((left, right) => left.retryAt - right.retryAt)[0];
+  return earliest
+    ? { plan: earliest.plan, index: earliest.index, cooldownWaitMs: Math.max(0, earliest.retryAt - now) }
+    : null;
+}
+
+function normalizePlanObservation(value) {
+  if (typeof value === "number") return { count: value, fingerprints: [], endConfirmed: false, lastAt: null };
+  if (!value || typeof value !== "object") return { count: 0, fingerprints: [], endConfirmed: false, lastAt: null };
+  return {
+    count: Math.max(0, Number(value.count) || 0),
+    fingerprints: Array.isArray(value.fingerprints) ? value.fingerprints.filter(Boolean).slice(-6) : [],
+    endConfirmed: value.endConfirmed === true,
+    lastAt: value.lastAt || null
+  };
+}
+
+function autopilotPlanKey(plan, index = 0) {
+  plan ||= {};
+  return [index, plan.expectationLabel, plan.role, plan.location].map((value) => String(value ?? "").trim()).join(":");
+}
+
+function goalToolAttention(error, { preserveCurrentJob = false } = {}) {
+  stopAutopilotWith(error, "autopilot-blocked", { preserveCurrentJob });
+  return { progress: false, needsAttention: true, summary: error.message };
+}
+
+function requiredGoalAction(tool, message, plan = []) {
+  return { tool, arguments: {}, message, plan };
+}
+
+function continueGoal(summary, tool, options) {
+  options ||= {};
+  const { progress = true, data, plan = [] } = options;
+  return {
+    progress,
+    summary,
+    ...(data === undefined ? {} : { data }),
+    requiredNextAction: requiredGoalAction(tool, summary, plan)
+  };
+}
+
+async function prepareJobSearchGoal(arguments_ = {}, task = {}) {
+  let autopilot = activeAutopilotGoal();
+  if (!autopilot) {
+    const requested = automaticApplicationTarget(
+      arguments_.targetApplications
+      || requestedApplicationTarget(task?.sourceText || task?.goal)
+      || DEFAULT_AUTO_APPLY_TARGET
+    );
+    resumeOrInitializeAutomaticJobSearchGoal(requested);
+    autopilot = activeAutopilotGoal();
+  }
+  const runId = autopilot.runId;
+  const context = autopilot.goalContext || {};
+  try {
+    if (!context.providerReady) {
+      await verifyAutopilotProvider(runId);
+      patchAutopilotGoalContext({ providerReady: true, lastAction: "provider-verified", lastVerifiedAt: new Date().toISOString() });
+      return continueGoal("模型服务已验证；继续准备候选人事实证据", "prepare_job_search_goal", {
+        plan: ["准备真实候选人证据", "读取 BOSS 求职期望", "循环处理岗位直到目标完成"]
+      });
+    }
+    if (!context.evidenceReady) {
+      await ensureAutopilotCandidateEvidence(runId);
+      patchAutopilotGoalContext({ evidenceReady: true, lastAction: "candidate-evidence-ready", lastVerifiedAt: new Date().toISOString() });
+      return continueGoal("候选人真实技术证据已就绪；继续读取 BOSS 已保存的求职期望", "prepare_job_search_goal");
+    }
+    if (!Array.isArray(context.plans) || !context.plans.length) {
+      const initialTab = await bridge.execute({ kind: "openBossJobs" });
+      let page = await waitForBossList(runId, initialTab.id, "BOSS 职位列表", 20);
+      page = await exposeBossListHeader(runId, initialTab.id, page);
+      const plans = buildBossExpectationPlans(page?.boss?.expectationOptions || []);
+      if (!plans.length) throw new Error("没有识别到 BOSS 顶部已保存的求职期望。请先在 BOSS 添加包含岗位和城市的求职期望，再继续");
+      patchAutopilotGoalContext({
+        tabId: initialTab.id,
+        plans,
+        planIndex: 0,
+        activeExpectation: "",
+        activeLocation: "",
+        exhaustedPlanLabels: [],
+        exhaustedPlanKeys: [],
+        exhaustionAttempts: {},
+        planCooldowns: {},
+        attemptCounts: {},
+        actionLedger: [],
+        currentJobPhase: "",
+        pendingSendEvidence: null,
+        lastAction: "expectations-read",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      store.update((state) => {
+        state.workflow.search.locations = [...new Set(plans.map((plan) => plan.location))];
+        state.workflow.search.queries = [...new Set(plans.map((plan) => plan.role))];
+      });
+      setAutopilot({ status: "running-goal", stage: "goal-active", message: `已读取 ${plans.length} 个 BOSS 求职期望；下一步由 Agent 根据真实页面决定` });
+      return continueGoal(`已读取 ${plans.length} 个 BOSS 求职期望；开始逐个观察真实 JD`, "inspect_next_job_for_goal");
+    }
+    return continueGoal("求职目标运行所需事实已经准备完成；继续寻找下一个可沟通岗位", "inspect_next_job_for_goal", { progress: false });
+  } catch (error) {
+    return goalToolAttention(error);
+  }
+}
+
+async function inspectNextJobForGoal() {
+  const autopilot = activeAutopilotGoal();
+  if (!autopilot) return { progress: false, summary: "尚未建立运行中的求职目标，请先准备目标" };
+  const runId = autopilot.runId;
+  const context = autopilot.goalContext || {};
+  const target = automaticApplicationTarget(autopilot.targetApplications);
+  if (autopilot.sent >= target) return { progress: false, summary: `目标已经达到：${autopilot.sent}/${target}` };
+
+  const pending = autopilot.currentJobId && store.state.jobs.find((job) => job.id === autopilot.currentJobId);
+  const pendingPhase = String(context.currentJobPhase || "");
+  if (pending && ["sent", "replied", "interview"].includes(pending.status)) {
+    setAutopilot({ currentJobId: null });
+    patchAutopilotGoalContext({ currentJobPhase: "", pendingSendEvidence: null });
+  } else if (pending?.analysis?.matches === true && pending.greeting) {
+    return continueGoal(
+      `${pending.company} / ${pending.title} 已完成匹配判断${pendingPhase ? `，从事务检查点 ${pendingPhase} 继续` : ""}`,
+      "contact_current_matched_job",
+      {
+        progress: false,
+        plan: ["核验当前岗位与会话身份", "执行或恢复定制沟通", "仅在消息证据通过后计数并继续"]
+      }
+    );
+  }
+
+  const selected = nextAutopilotPlan(context);
+  if (!context.providerReady || !context.evidenceReady || !selected) {
+    return continueGoal("求职目标事实尚未准备完成；返回准备阶段补齐事实", "prepare_job_search_goal", { progress: false });
+  }
+
+  const { plan, index, cooldownWaitMs = 0 } = selected;
+  let tabId = context.tabId;
+  try {
+    if (cooldownWaitMs > 0) {
+      await sleep(Math.min(5_000, cooldownWaitMs));
+      return continueGoal(
+        `所有求职期望刚完成一轮稳定检查；冷却后继续观察（已验证沟通 ${autopilot.sent}/${target}）`,
+        "inspect_next_job_for_goal",
+        { progress: false }
+      );
+    }
+    let page = Number.isInteger(tabId) ? await bridge.execute({ kind: "inspect", tabId }).catch(() => null) : null;
+    const activeLocation = expectedBossLocation(plan);
+    if (!bossExpectationContextMatches(page, plan.expectationLabel, activeLocation)) {
+      const opened = await openBossJobList({ ...plan, tabId, runId, forceExpectation: false });
+      patchAutopilotGoalContext({
+        tabId: opened.tabId,
+        planIndex: index,
+        activeExpectation: opened.expectation.label,
+        activeLocation: opened.effectiveLocation,
+        lastAction: "expectation-context-restored",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      setAutopilot({ status: "running-search", stage: "observing", message: `已确认 BOSS 求职期望 ${opened.expectation.label} / ${opened.effectiveLocation}；下一步重新观察岗位列表` });
+      return continueGoal(`已恢复 ${opened.expectation.label} / ${opened.effectiveLocation} 的真实岗位列表`, "inspect_next_job_for_goal");
+    }
+
+    tabId = Number.isInteger(tabId) ? tabId : context.tabId;
+    const seenUrls = new Set(context.seenUrls || []);
+    const discoveredUrls = new Set(context.discoveredUrls || []);
+    const visible = jobCandidatesFromPage(page);
+    const fresh = visible.filter((candidate) => {
+      if (!candidate.url || seenUrls.has(candidate.url)) return false;
+      if (!candidateMatchesExpectedLocation(candidate, activeLocation)) return false;
+      const existing = store.state.jobs.find((job) => sameJobUrl(job.url, candidate.url));
+      return !["sent", "replied", "interview"].includes(existing?.status);
+    });
+    const persisted = persistSearchCandidates(fresh);
+    const planKey = autopilotPlanKey(plan, index);
+    const exhaustionAttempts = { ...(context.exhaustionAttempts || {}) };
+    const planCooldowns = { ...(context.planCooldowns || {}) };
+    if (fresh.length) {
+      delete exhaustionAttempts[planKey];
+      delete planCooldowns[planKey];
+    }
+    for (const candidate of fresh) discoveredUrls.add(candidate.url);
+    if (persisted.addedCount) {
+      store.update((state) => { state.workflow.search.discovered += persisted.addedCount; });
+    }
+    setAutopilot({ discovered: discoveredUrls.size, status: "running-analysis", stage: "observing" });
+
+    const resumablePending = pending && !["sent", "replied", "interview"].includes(pending.status)
+      && ["selected", "detail-read", "analysis-started"].includes(pendingPhase)
+      ? pending
+      : null;
+    const candidateId = resumablePending?.id || persisted.candidateIds[0];
+    if (!candidateId) {
+      const advanced = await advanceBossJobResults(runId, tabId, seenUrls);
+      if (advanced.page) {
+        patchAutopilotGoalContext({
+          tabId,
+          planIndex: index,
+          exhaustionAttempts,
+          planCooldowns,
+          discoveredUrls: [...discoveredUrls],
+          lastAction: "results-advanced",
+          lastVerifiedAt: new Date().toISOString()
+        });
+        return continueGoal(`当前可见岗位已经判断完，已继续浏览 ${plan.expectationLabel} 的新结果`, "inspect_next_job_for_goal");
+      }
+      const previous = normalizePlanObservation(exhaustionAttempts[planKey]);
+      const fingerprint = advanced.fingerprint || bossResultFingerprint(page);
+      const stableFingerprint = Boolean(fingerprint) && previous.fingerprints.at(-1) === fingerprint;
+      const observation = {
+        count: stableFingerprint ? previous.count + 1 : 1,
+        fingerprints: [...previous.fingerprints, fingerprint].filter(Boolean).slice(-6),
+        endConfirmed: advanced.endConfirmed === true,
+        lastAt: new Date().toISOString()
+      };
+      exhaustionAttempts[planKey] = observation;
+      const confirmedExhausted = observation.endConfirmed && observation.count >= PLAN_EMPTY_CONFIRMATIONS;
+      if (confirmedExhausted) {
+        planCooldowns[planKey] = Date.now() + PLAN_RETRY_COOLDOWN_MS;
+      }
+      patchAutopilotGoalContext({
+        tabId,
+        planIndex: confirmedExhausted ? (index + 1) % context.plans.length : index,
+        exhaustionAttempts,
+        planCooldowns,
+        discoveredUrls: [...discoveredUrls],
+        lastAction: confirmedExhausted ? "expectation-cooling" : "expectation-empty-recheck",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      return continueGoal(
+        confirmedExhausted
+          ? `${plan.expectationLabel} 在稳定末页连续 ${observation.count} 次没有新岗位，进入短暂冷却并切换其他求职期望`
+          : `${plan.expectationLabel} 暂未读到新岗位（稳定确认 ${observation.count}/${PLAN_EMPTY_CONFIRMATIONS}），保持目标并重新观察`,
+        "inspect_next_job_for_goal"
+      );
+    }
+
+    const candidate = store.state.jobs.find((job) => job.id === candidateId);
+    if (!candidate) return continueGoal("候选岗位保存后未能回读，重新观察真实页面", "inspect_next_job_for_goal", { progress: false });
+    patchAutopilotGoalContext({
+      discoveredUrls: [...discoveredUrls],
+      currentJobPhase: "selected",
+      lastAction: resumablePending ? "job-resumed" : "job-selected"
+    });
+    setAutopilot({ currentJobId: candidate.id, message: `目标 ${autopilot.sent}/${target}；正在读取 ${candidate.company} / ${candidate.title} 的完整 JD` });
+
+    try {
+      const detailPage = await selectBossJobCard(runId, tabId, candidate);
+      const job = upsertDetailedJob(detailPage, candidate.id, candidate.url);
+      patchAutopilotGoalContext({ currentJobPhase: "detail-read", lastAction: "job-detail-read" });
+      if (!candidateMatchesExpectedLocation(job, activeLocation)) {
+        seenUrls.add(job.url || candidate.url);
+        store.addActivity(`目标 Agent 跳过异地岗位：${job.company} / ${job.title}（${job.location || "地点未识别"}，当前求职期望 ${activeLocation}）`, "done");
+        await restoreBossListAfterContact(runId, tabId, job, { contacted: false });
+        setAutopilot({ currentJobId: null });
+        patchAutopilotGoalContext({
+          seenUrls: [...seenUrls],
+          currentJobPhase: "",
+          pendingSendEvidence: null,
+          lastInspectedJobId: job.id,
+          lastAction: "job-skipped-location",
+          lastVerifiedAt: new Date().toISOString()
+        });
+        return continueGoal(`${job.company} / ${job.title} 不属于当前求职期望城市，已跳过并继续目标`, "inspect_next_job_for_goal");
+      }
+
+      patchAutopilotGoalContext({ currentJobPhase: "analysis-started", lastAction: "job-analysis-started" });
+      const analysis = await analyzeForAutopilot(job, { matchOnly: true });
+      const analyzed = Number(store.state.workflow.autopilot.analyzed || 0) + 1;
+      setAutopilot({ analyzed, message: `${job.company} / ${job.title}：${analysis.matches ? "技术方向匹配，下一步可执行沟通" : "存在明确方向或技术硬冲突，已跳过"}` });
+      seenUrls.add(job.url || candidate.url);
+      patchAutopilotGoalContext({
+        seenUrls: [...seenUrls],
+        currentJobPhase: analysis.matches ? "matched" : "",
+        lastInspectedJobId: job.id,
+        lastAction: analysis.matches ? "job-matched" : "job-skipped-mismatch",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      if (analysis.matches === true && job.greeting) {
+        const selectedCount = Number(store.state.workflow.autopilot.selected || 0) + 1;
+        setAutopilot({ selected: selectedCount, status: "running-apply", stage: "matched", currentJobId: job.id });
+        return continueGoal(
+          `${job.company} / ${job.title} 已完成 JD 匹配与定制招呼；继续执行并验证真实沟通`,
+          "contact_current_matched_job",
+          { data: { jobId: job.id } }
+        );
+      }
+
+      store.addActivity(`目标 Agent 未沟通：${job.company} / ${job.title}（${analysis.summary || analysis.hardGaps?.join("、") || "岗位存在明确硬性冲突"}）`, "done");
+      await restoreBossListAfterContact(runId, tabId, job, { contacted: false });
+      setAutopilot({ currentJobId: null, status: "running-search", stage: "goal-active" });
+      return continueGoal(`${job.company} / ${job.title} 不符合技术方向；已完成判断并继续目标`, "inspect_next_job_for_goal");
+    } catch (error) {
+      if (fatalAutopilotError(error)) throw error;
+      store.addActivity(`目标 Agent 当前岗位未完成：${candidate.company} / ${candidate.title}（${error.message}）`, "error");
+      const latestContext = store.state.workflow.autopilot.goalContext || {};
+      if (["contact-clicking", "contact-clicked", "composer-ready", "typed", "send-clicking", "send-clicked"].includes(latestContext.currentJobPhase)) {
+        throw unverifiedBossApplicationError(candidate, error);
+      }
+      const attemptCounts = { ...(latestContext.attemptCounts || {}) };
+      const attemptKey = String(candidate.url || candidate.id);
+      const attempts = Number(attemptCounts[attemptKey] || 0) + 1;
+      attemptCounts[attemptKey] = attempts;
+      if (attempts >= 3) seenUrls.add(candidate.url);
+      const recovered = await recoverBossListAfterCandidateError(runId, tabId, plan, candidate);
+      patchAutopilotGoalContext({
+        tabId: recovered.tabId,
+        seenUrls: [...seenUrls],
+        attemptCounts,
+        currentJobPhase: "",
+        pendingSendEvidence: null,
+        lastInspectedJobId: candidate.id,
+        lastAction: attempts >= 3 ? "candidate-retry-exhausted" : "candidate-recovered",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      setAutopilot({ currentJobId: null, status: "running-search", stage: "goal-active" });
+      return continueGoal(
+        attempts >= 3
+          ? `${candidate.company} / ${candidate.title} 连续 ${attempts} 次无法完成，已记录原因并继续实现总体目标`
+          : `${candidate.company} / ${candidate.title} 本次未完成（${attempts}/3），已安全恢复并重新观察`,
+        "inspect_next_job_for_goal"
+      );
+    }
+  } catch (error) {
+    return goalToolAttention(error, { preserveCurrentJob: Boolean(store.state.workflow.autopilot.currentJobId) });
+  }
+}
+
+async function contactCurrentMatchedJobForGoal() {
+  const autopilot = activeAutopilotGoal();
+  if (!autopilot) return { progress: false, summary: "当前没有运行中的求职目标" };
+  const context = autopilot.goalContext || {};
+  const job = autopilot.currentJobId && store.state.jobs.find((entry) => entry.id === autopilot.currentJobId);
+  if (!job || job.analysis?.matches !== true || !job.greeting) {
+    return continueGoal(
+      "当前没有已完成 JD 匹配和定制招呼的待沟通岗位；重新观察页面并寻找可执行对象",
+      "inspect_next_job_for_goal",
+      { progress: false }
+    );
+  }
+  const runId = autopilot.runId;
+  const target = automaticApplicationTarget(autopilot.targetApplications);
+  try {
+    setAutopilot({ status: "running-apply", stage: "applying", message: `目标 ${autopilot.sent}/${target}；Computer Use 正在沟通 ${job.company} / ${job.title}` });
+    const result = await applyCurrentBossJob(runId, context.tabId, job);
+    const sent = Number(store.state.workflow.autopilot.sent || 0);
+    patchAutopilotGoalContext({
+      tabId: result.tabId,
+      currentJobPhase: "",
+      pendingSendEvidence: null,
+      lastInspectedJobId: job.id,
+      lastAction: "application-verified",
+      lastVerifiedAt: new Date().toISOString()
+    });
+    setAutopilot({ currentJobId: null });
+    if (sent >= target) {
+      setAutopilot({ status: "complete", stage: "complete", message: `目标已完成：已验证沟通 ${sent}/${target}`, completedAt: new Date().toISOString() });
+      setWorkflow({ phase: "apply-complete", lastError: "" });
+      store.addActivity(`目标驱动求职 Agent 完成：已验证沟通 ${sent}/${target}`);
+      return { progress: true, summary: `目标已完成：已验证沟通 ${sent}/${target}` };
+    }
+    setAutopilot({ status: "running-goal", stage: "goal-active", message: `已验证沟通 ${sent}/${target}；Agent 将重新观察页面并决定下一步` });
+    return continueGoal(`${job.company} / ${job.title} 的定制沟通已验证发送（${sent}/${target}）；继续寻找下一个岗位`, "inspect_next_job_for_goal");
+  } catch (error) {
+    if (job.status === "sent") {
+      const sent = Number(store.state.workflow.autopilot.sent || 0);
+      patchAutopilotGoalContext({
+        currentJobPhase: "",
+        pendingSendEvidence: null,
+        lastInspectedJobId: job.id,
+        lastAction: "application-verified-list-not-restored",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      if (sent >= target) {
+        setAutopilot({ currentJobId: null, status: "complete", stage: "complete", message: `目标已完成：已验证沟通 ${sent}/${target}`, completedAt: new Date().toISOString() });
+        setWorkflow({ phase: "apply-complete", lastError: "" });
+        store.addActivity(`目标驱动求职 Agent 完成：已验证沟通 ${sent}/${target}`);
+        return { progress: true, summary: `目标已完成：已验证沟通 ${sent}/${target}` };
+      }
+      setAutopilot({ currentJobId: null, status: "running-goal", stage: "goal-active", message: `定制沟通已经验证发送（${sent}/${target}），返回列表未完成；Agent 将重新观察并恢复` });
+      return continueGoal(`${job.company} / ${job.title} 已验证发送；下一轮恢复岗位列表并继续目标`, "inspect_next_job_for_goal");
+    }
+    const unverified = error?.code === "BOSS_APPLY_NOT_VERIFIED" ? error : unverifiedBossApplicationError(job, error);
+    return goalToolAttention(unverified, { preserveCurrentJob: true });
+  }
 }
 
 async function startAutopilotFromCurrentList() {
@@ -1946,8 +2759,64 @@ tenantRuntime.setTenantInitializer(() => {
       job.company = inferCompanyName(job);
     }
   });
-  if (String(store.state.workflow.autopilot?.status).startsWith("running-")) {
-    setAutopilot({ status: "stopped", stage: "stopped", stopRequested: true, message: "服务曾中断，请重新授权一个批次" });
+  const interruptedAutopilot = store.state.workflow.autopilot || {};
+  const interruptedStatus = String(interruptedAutopilot.status || "");
+  const interruptedTarget = automaticApplicationTarget(interruptedAutopilot.targetApplications || interruptedAutopilot.autoApplyLimit);
+  const interruptedSent = Number(interruptedAutopilot.sent || 0);
+  const interruptedAt = new Date().toISOString();
+  if (interruptedStatus.startsWith("running-")) {
+    if (interruptedAutopilot.stopRequested) {
+      setAutopilot({
+        status: "stopped",
+        stage: "stopped",
+        stopRequested: true,
+        recoveryReason: "",
+        interruptedAt,
+        message: "服务重启前已经收到停止请求，任务保持停止"
+      });
+    } else if (interruptedSent >= interruptedTarget) {
+      setAutopilot({
+        status: "complete",
+        stage: "complete",
+        stopRequested: false,
+        recoveryReason: "",
+        interruptedAt,
+        completedAt: interruptedAt,
+        message: `服务重启时确认原目标已经完成：已验证沟通 ${interruptedSent}/${interruptedTarget}`
+      });
+      setWorkflow({ phase: "apply-complete", lastError: "" });
+    } else {
+      const context = interruptedAutopilot.goalContext || {};
+      setAutopilot({
+        status: "recoverable",
+        stage: context.currentJobPhase || context.pendingSendEvidence ? "recovery-pending-verification" : "recovery-pending",
+        stopRequested: false,
+        recoveryReason: "server-restart",
+        interruptedAt,
+        completedAt: null,
+        message: context.currentJobPhase || context.pendingSendEvidence
+          ? `服务曾中断；已保留原运行、当前岗位和发送证据。重新启动后会先核验外部结果，不会直接重复发送（${interruptedSent}/${interruptedTarget}）`
+          : `服务曾中断；已保留原运行、岗位计划和进度，可从 ${interruptedSent}/${interruptedTarget} 安全恢复`
+      });
+      setWorkflow({ phase: "autopilot-recoverable", lastError: "" });
+    }
+  } else if (recoverableAutomaticJobSearchGoal(interruptedAutopilot)
+    && interruptedStatus === "stopped"
+    && /服务曾中断，请重新授权一个批次/.test(String(interruptedAutopilot.message || ""))) {
+    // Migrate runs persisted by older releases, which stopped and asked for a
+    // new batch after restart even though their goal checkpoint was intact.
+    setAutopilot({
+      status: "recoverable",
+      stage: interruptedAutopilot.goalContext?.currentJobPhase || interruptedAutopilot.goalContext?.pendingSendEvidence
+        ? "recovery-pending-verification"
+        : "recovery-pending",
+      stopRequested: false,
+      recoveryReason: "server-restart",
+      interruptedAt,
+      completedAt: null,
+      message: `已恢复旧版本保留的求职目标；重新启动后会从 ${interruptedSent}/${interruptedTarget} 继续`
+    });
+    setWorkflow({ phase: "autopilot-recoverable", lastError: "" });
   }
   if (store.state.workflow.phase === "autopilot-blocked" && /Cannot read properties of null \(reading 'adapter'\)|页面读取脚本没有返回内容|BOSS 页面读取(?:通道不可用|失败)/.test(store.state.workflow.lastError || "")) {
     setAutopilot({
@@ -1969,14 +2838,14 @@ tenantRuntime.setTenantInitializer(() => {
         status: "needs-attention",
         currentTool: null,
         waitFor: null,
-        message: "服务曾中断；为避免重复外部操作，任务没有自动续跑，请重新下达目标",
+        message: "服务曾中断；原求职目标和外部操作检查点已经保留。再次点击自动找工作会安全恢复同一目标",
         updatedAt: new Date().toISOString()
       };
     });
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.16.0", remoteMode, multiUser: multiUserMode }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.17.0", remoteMode, multiUser: multiUserMode }));
 app.get("/api/state", (_req, res) => res.json(statePayload()));
 
 app.post("/api/provider", (req, res) => {
@@ -2126,19 +2995,25 @@ const agentTools = [
     }
   },
   {
-    name: "search_and_apply_jobs",
-    description: "读取 BOSS 已保存求职期望、循环浏览完整 JD、技术匹配即发送逐岗位定制招呼语",
+    name: "prepare_job_search_goal",
+    description: "建立自动找工作目标，并按需逐项验证模型、候选人事实和 BOSS 已保存求职期望；每次只推进一个准备动作",
     input: { targetApplications: "希望完成的已验证沟通数量，1到500；未指定时默认60" },
     risk: "jobs:apply",
-    execute: async (arguments_, task) => {
-      if (String(store.state.workflow.autopilot?.status || "").startsWith("running-")) {
-        return { progress: false, waitFor: "job-search", summary: jobSearchProgressContent() };
-      }
-      const requestedTarget = requestedApplicationTarget(task?.sourceText || task?.goal);
-      const targetApplications = requestedTarget || DEFAULT_AUTO_APPLY_TARGET;
-      const result = startAutomaticJobSearch(targetApplications);
-      return { progress: true, waitFor: "job-search", summary: `已启动目标为 ${result.targetApplications} 个已验证沟通的搜索与投递`, data: result };
-    }
+    execute: prepareJobSearchGoal
+  },
+  {
+    name: "inspect_next_job_for_goal",
+    description: "观察真实 BOSS 页面并只处理一个尚未判断的完整 JD；保存匹配结论和定制招呼后交回 Agent 重新规划",
+    input: {},
+    risk: "jobs:apply",
+    execute: inspectNextJobForGoal
+  },
+  {
+    name: "contact_current_matched_job",
+    description: "仅对当前已经读完完整 JD、确认技术匹配且生成定制招呼的岗位执行真实沟通，并验证消息确实发送",
+    input: {},
+    risk: "jobs:apply",
+    execute: contactCurrentMatchedJobForGoal
   },
   {
     name: "stop_job_search",
@@ -2196,6 +3071,11 @@ const agentTools = [
 
 async function observeAgentState() {
   const workflow = store.state.workflow;
+  const autopilot = workflow.autopilot || {};
+  const goalContext = autopilot.goalContext || {};
+  const currentJob = autopilot.currentJobId
+    ? store.state.jobs.find((job) => job.id === autopilot.currentJobId)
+    : null;
   return {
     now: new Date().toISOString(),
     provider: {
@@ -2219,13 +3099,44 @@ async function observeAgentState() {
       message: workflow.resumeApply?.message || workflow.resumeAuditMessage || ""
     },
     jobSearch: {
-      status: workflow.autopilot?.status,
-      target: workflow.autopilot?.targetApplications,
-      discovered: workflow.autopilot?.discovered,
-      analyzed: workflow.autopilot?.analyzed,
-      selected: workflow.autopilot?.selected,
-      sent: workflow.autopilot?.sent,
-      message: workflow.autopilot?.message
+      status: autopilot.status,
+      runId: autopilot.runId,
+      stage: autopilot.stage,
+      target: autopilot.targetApplications,
+      discovered: autopilot.discovered,
+      analyzed: autopilot.analyzed,
+      selected: autopilot.selected,
+      sent: autopilot.sent,
+      currentJobId: autopilot.currentJobId,
+      message: autopilot.message,
+      goal: {
+        providerReady: goalContext.providerReady === true,
+        evidenceReady: goalContext.evidenceReady === true,
+        planCount: Array.isArray(goalContext.plans) ? goalContext.plans.length : 0,
+        planIndex: Number(goalContext.planIndex) || 0,
+        activeExpectation: goalContext.activeExpectation || "",
+        activeLocation: goalContext.activeLocation || "",
+        seenCount: Array.isArray(goalContext.seenUrls) ? goalContext.seenUrls.length : 0,
+        exhaustedPlanLabels: Array.isArray(goalContext.exhaustedPlanLabels) ? goalContext.exhaustedPlanLabels : [],
+        exhaustedPlanKeys: Array.isArray(goalContext.exhaustedPlanKeys) ? goalContext.exhaustedPlanKeys : [],
+        exhaustionAttempts: goalContext.exhaustionAttempts && typeof goalContext.exhaustionAttempts === "object" ? goalContext.exhaustionAttempts : {},
+        planCooldowns: goalContext.planCooldowns && typeof goalContext.planCooldowns === "object" ? goalContext.planCooldowns : {},
+        attemptCounts: goalContext.attemptCounts && typeof goalContext.attemptCounts === "object" ? goalContext.attemptCounts : {},
+        actionLedger: Array.isArray(goalContext.actionLedger) ? goalContext.actionLedger.slice(-12) : [],
+        currentJobPhase: goalContext.currentJobPhase || "",
+        hasPendingSendEvidence: Boolean(goalContext.pendingSendEvidence),
+        lastAction: goalContext.lastAction || "",
+        lastVerifiedAt: goalContext.lastVerifiedAt || null
+      },
+      currentJob: currentJob ? {
+        id: currentJob.id,
+        title: currentJob.title,
+        company: currentJob.company,
+        location: currentJob.location,
+        status: currentJob.status,
+        matches: currentJob.analysis?.matches === true,
+        greetingReady: Boolean(currentJob.greeting)
+      } : null
     },
     jobs: {
       total: store.state.jobs.length,
@@ -2237,11 +3148,6 @@ async function observeAgentState() {
 }
 
 async function agentBackgroundStatus(waitFor) {
-  if (waitFor === "job-search") {
-    const autopilot = store.state.workflow.autopilot || {};
-    const running = String(autopilot.status || "").startsWith("running-");
-    return { done: !running, success: autopilot.status === "complete", progress: (autopilot.sent || 0) > 0, summary: jobSearchProgressContent() };
-  }
   if (waitFor === "resume-rewrite") {
     const apply = store.state.workflow.resumeApply || {};
     const running = ["preparing", "running"].includes(apply.status)
@@ -2254,10 +3160,12 @@ async function agentBackgroundStatus(waitFor) {
 
 async function verifyAgentFinish({ task, observation }) {
   if (!isJobSearchExecutionIntent(task?.sourceText || task?.goal)) return { done: true };
-  const startedSearch = (task?.steps || []).some((step) => step.tool === "search_and_apply_jobs");
+  const goalTools = new Set(["prepare_job_search_goal", "inspect_next_job_for_goal", "contact_current_matched_job"]);
+  const startedSearch = Boolean(observation?.jobSearch?.runId)
+    || (task?.steps || []).some((step) => goalTools.has(step.tool));
   const jobSearch = observation?.jobSearch || {};
-  const target = requestedApplicationTarget(task?.sourceText || task?.goal)
-    || Number(jobSearch.target)
+  const target = Number(jobSearch.target)
+    || requestedApplicationTarget(task?.sourceText || task?.goal)
     || DEFAULT_AUTO_APPLY_TARGET;
   const sent = Number(jobSearch.sent) || 0;
   if (startedSearch && jobSearch.status === "complete" && sent >= target) return { done: true };
@@ -2662,10 +3570,54 @@ app.post("/api/workflow/autopilot/analyze", async (_req, res) => {
 app.post("/api/workflow/autopilot/run", async (req, res) => {
   if (req.body?.approved !== true) return res.status(400).json({ error: "需要本人明确批准本批自动投递" });
   if (String(store.state.workflow.autopilot.status).startsWith("running-")) return res.status(409).json({ error: "已经有一个托管任务在运行" });
+  const agentRuntime = tenantRuntime.agentRuntime();
+  if (["planning", "executing", "waiting"].includes(agentRuntime.current()?.status)) {
+    return res.status(409).json({ error: "已经有一个目标 Agent 在运行" });
+  }
+  let goalResult = null;
   try {
-    const result = startAutomaticJobSearch(req.body?.targetApplications);
-    res.status(202).json({ ...result, workflow: store.state.workflow });
+    const targetApplications = automaticApplicationTarget(req.body?.targetApplications);
+    goalResult = resumeOrInitializeAutomaticJobSearchGoal(targetApplications);
+    const effectiveTarget = goalResult.targetApplications;
+    const goal = `${goalResult.resumed ? "安全恢复服务中断前的同一求职目标；先核验任何未决外部发送，再" : ""}使用真实 Chrome 和 BOSS 已保存求职期望，持续寻找技术方向匹配的岗位，逐个读取完整 JD、生成定制招呼并完成至少 ${effectiveTarget} 个已验证沟通；每个动作后重新观察并规划，未达到数量不得结束`;
+    const task = agentRuntime.start({ goal, sourceText: goal, scopes: ["jobs:apply"] });
+    if (goalResult.resumed) {
+      const resumedAutopilot = store.state.workflow.autopilot || {};
+      const resumedContext = resumedAutopilot.goalContext || {};
+      const hasExternalCheckpoint = Boolean(resumedContext.pendingSendEvidence)
+        || ["contact-clicking", "contact-clicked", "composer-ready", "typed", "send-clicking", "send-clicked"].includes(String(resumedContext.currentJobPhase || ""));
+      const resumeTool = hasExternalCheckpoint && resumedAutopilot.currentJobId
+        ? "contact_current_matched_job"
+        : resumedContext.providerReady && resumedContext.evidenceReady && Array.isArray(resumedContext.plans) && resumedContext.plans.length
+          ? "inspect_next_job_for_goal"
+          : "prepare_job_search_goal";
+      agentRuntime.update({
+        requiredNextAction: {
+          tool: resumeTool,
+          arguments: {},
+          message: hasExternalCheckpoint
+            ? "先核验服务中断前的外部沟通检查点；只有验证成功才计数，结果不明确时绝不新建发送"
+            : "从原目标最近一次已验证进度继续"
+        }
+      });
+    }
+    res.status(202).json({ ...goalResult, agentRunId: task.runId, workflow: store.state.workflow });
   } catch (error) {
+    const preserveRecovery = goalResult?.resumed === true || recoverableAutomaticJobSearchGoal();
+    setAutopilot(preserveRecovery ? {
+      status: "recoverable",
+      stage: "recovery-pending",
+      stopRequested: false,
+      recoveryReason: goalResult?.resumed ? "agent-start-failed" : "server-restart",
+      message: `原求职目标仍安全保留，目标 Agent 暂未启动：${error.message}`,
+      completedAt: null
+    } : {
+      status: "stopped",
+      stage: "stopped",
+      stopRequested: true,
+      message: `目标 Agent 未能启动：${error.message}`,
+      completedAt: new Date().toISOString()
+    });
     res.status(400).json({ error: error.message });
   }
 });
@@ -2701,7 +3653,12 @@ app.post("/api/workflow/autopilot/apply-selected", (req, res) => {
 });
 
 app.post("/api/workflow/autopilot/stop", (_req, res) => {
-  if (!String(store.state.workflow.autopilot.status).startsWith("running-")) return res.json({ workflow: store.state.workflow });
+  const agentRuntime = tenantRuntime.agentRuntime();
+  if (!["planning", "executing", "waiting"].includes(agentRuntime.current()?.status)
+    && !String(store.state.workflow.autopilot.status).startsWith("running-")) {
+    return res.json({ workflow: store.state.workflow });
+  }
+  agentRuntime.stop();
   setAutopilot({ stopRequested: true, message: "正在完成当前安全边界并停止…" });
   store.addActivity("用户请求停止托管投递");
   res.status(202).json({ workflow: store.state.workflow });

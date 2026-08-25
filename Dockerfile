@@ -1,4 +1,17 @@
-FROM node:22-alpine
+FROM node:22-alpine AS extension-package
+
+WORKDIR /build
+
+RUN apk add --no-cache zip
+
+COPY extension ./extension
+COPY scripts/package-extension.sh ./scripts/package-extension.sh
+
+RUN sh scripts/package-extension.sh \
+    && mkdir -p /extension-downloads \
+    && cp dist/JobDeck-Chrome-Extension-v*.zip /extension-downloads/
+
+FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
@@ -8,6 +21,7 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY server ./server
 COPY web ./web
 COPY extension ./extension
+COPY --from=extension-package /extension-downloads ./web/downloads
 COPY LICENSE ./LICENSE
 
 RUN mkdir -p /data && chown -R node:node /app /data

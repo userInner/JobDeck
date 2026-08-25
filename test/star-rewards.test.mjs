@@ -69,7 +69,7 @@ test("Star reward rejects a gist owned by a different GitHub account", async () 
   }
 });
 
-test("Star reward accepts a valid screenshot after public Star verification without storing the image", async () => {
+test("Star screenshot proof is stored for manual review and never credits automatically", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-star-"));
   const rewarded = [];
   const screenshot = Buffer.concat([
@@ -91,19 +91,23 @@ test("Star reward accepts a valid screenshot after public Star verification with
     const result = await service.claimScreenshot("account-token", { username: "octocat", screenshot });
 
     assert.equal(result.amount, 5);
+    assert.equal(result.status, "pending_review");
+    assert.equal(result.reviewRequired, true);
     assert.deepEqual(result.evidence, { type: "screenshot", mime: "image/png", bytes: screenshot.length });
-    assert.equal(rewarded.length, 1);
+    assert.equal(rewarded.length, 0);
 
-    const files = fs.readdirSync(directory);
-    assert.deepEqual(files, ["star-rewards.json"]);
     const ledger = JSON.parse(fs.readFileSync(path.join(directory, "star-rewards.json"), "utf8"));
     assert.equal(ledger.rewards[0].evidenceType, "screenshot");
     assert.equal(ledger.rewards[0].evidenceHash.length, 64);
-    assert.equal(ledger.rewards[0].status, "rewarded");
+    assert.equal(ledger.rewards[0].status, "pending_review");
+    assert.equal(ledger.rewards[0].reviewRequired, true);
+    const evidencePath = path.join(directory, "star-reward-evidence", ledger.rewards[0].evidenceFile);
+    assert.deepEqual(fs.readFileSync(evidencePath), screenshot);
+    assert.equal(fs.statSync(evidencePath).mode & 0o777, 0o600);
 
     await assert.rejects(
       () => service.claimScreenshot("account-token", { username: "octocat", screenshot }),
-      (error) => error instanceof StarRewardError && error.code === "ALREADY_REWARDED"
+      (error) => error instanceof StarRewardError && error.code === "REWARD_PENDING"
     );
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

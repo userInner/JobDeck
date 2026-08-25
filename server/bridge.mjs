@@ -8,12 +8,15 @@ function normalizeAction(input = {}) {
   const kind = String(input.kind || "");
   if (!SAFE.has(kind) && !CONTROLLED.has(kind)) throw new Error(`不支持的浏览器动作：${kind || "空"}`);
   const output = { kind };
-  for (const key of ["selector", "anchorSelector", "text", "value", "url", "direction", "reason"]) {
+  for (const key of ["selector", "anchorSelector", "text", "value", "url", "direction", "reason", "operationId"]) {
     if (input[key] !== undefined && input[key] !== null) {
       output[key] = String(input[key]).slice(0, key === "value" ? 6000 : 1200);
     }
   }
   if (input.tabId !== undefined) output.tabId = Number(input.tabId);
+  if (input.operationAttempt !== undefined) {
+    output.operationAttempt = Math.max(0, Math.min(100, Math.trunc(Number(input.operationAttempt) || 0)));
+  }
   if (input.x !== undefined) output.x = Math.max(0, Math.min(10000, Number(input.x)));
   if (input.y !== undefined) output.y = Math.max(0, Math.min(10000, Number(input.y)));
   if (input.amount !== undefined) output.amount = Math.max(100, Math.min(4000, Number(input.amount)));
@@ -65,12 +68,14 @@ export class BrowserBridge {
       const url = new URL(req.url, "http://127.0.0.1");
       const origin = req.headers.origin || "";
       const protocols = String(req.headers["sec-websocket-protocol"] || "").split(",").map((item) => item.trim());
-      const protocolToken = protocols.find((item) => item.startsWith("token."))?.slice(6) || "";
-      const suppliedToken = protocolToken || url.searchParams.get("token") || "";
+      const protocolTokens = protocols.filter((item) => item.startsWith("token."));
+      const suppliedToken = protocolTokens.length === 1 ? protocolTokens[0].slice(6) : "";
       const supplied = Buffer.from(suppliedToken);
       const expected = Buffer.from(this.store.secrets.extensionToken);
       const tokenMatches = supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
-      if (url.pathname !== "/extension" || !tokenMatches || !origin.startsWith("chrome-extension://")) {
+      const extensionOrigin = /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+      if (url.pathname !== "/extension" || !protocols.includes("jobdeck") || protocolTokens.length !== 1
+        || !tokenMatches || !extensionOrigin) {
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;

@@ -3,7 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { TenantRuntimeManager } from "../server/tenant-runtime.mjs";
+import { EventEmitter } from "node:events";
+import {
+  JOBDECK_AUTH_SCOPES,
+  jobdeckDeviceRequestScope,
+  TenantRuntimeManager
+} from "../server/tenant-runtime.mjs";
 
 function fakeAccounts() {
   const profiles = new Map([
@@ -130,20 +135,92 @@ test("multi-user middleware binds bearer and extension requests to the correct t
     };
 
     let bearerTenant;
-    await middleware({ headers: { authorization: "Bearer token-alice" } }, response, () => {
+    const bearerRequest = { headers: { authorization: "Bearer token-alice" } };
+    await middleware(bearerRequest, response, () => {
       bearerTenant = manager.current();
     });
     assert.equal(bearerTenant, alice);
+    assert.equal(bearerRequest.jobdeckAuth.kind, "account");
+    assert.ok(bearerRequest.jobdeckAuth.scopes.includes(JOBDECK_AUTH_SCOPES.TENANT_SETTINGS));
 
     let deviceTenant;
-    await middleware({ headers: { "x-jobdeck-token": bob.store.secrets.extensionToken } }, response, () => {
+    const deviceRequest = { headers: { "x-jobdeck-token": bob.store.secrets.extensionToken } };
+    await middleware(deviceRequest, response, () => {
       deviceTenant = manager.current();
     });
     assert.equal(deviceTenant, bob);
+    assert.equal(deviceRequest.jobdeckAuth.kind, "device");
+    assert.ok(deviceRequest.jobdeckAuth.scopes.includes(JOBDECK_AUTH_SCOPES.BROWSER_OPERATE));
+    assert.ok(!deviceRequest.jobdeckAuth.scopes.includes(JOBDECK_AUTH_SCOPES.TENANT_SETTINGS));
 
+    response.statusCode = 200;
+    response.payload = null;
+    await manager.middleware({ allowedKinds: ["account"] })(deviceRequest, response, () => assert.fail("device token must not act as account bearer"));
+    assert.equal(response.statusCode, 403);
+    assert.equal(response.payload.code, "AUTH_KIND_FORBIDDEN");
+
+    response.statusCode = 200;
+    response.payload = null;
+    await manager.middleware({ requiredScopes: [JOBDECK_AUTH_SCOPES.TENANT_SETTINGS] })(deviceRequest, response, () => assert.fail("device token lacks tenant settings scope"));
+    assert.equal(response.statusCode, 403);
+    assert.equal(response.payload.code, "AUTH_SCOPE_REQUIRED");
+
+    response.statusCode = 200;
+    response.payload = null;
     await middleware({ headers: {} }, response, () => assert.fail("unauthorized request must not reach next"));
     assert.equal(response.statusCode, 401);
     assert.equal(response.payload.code, "AUTH_REQUIRED");
+    manager.close();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("device HTTP policy exposes only the extension execution surface", () => {
+  assert.equal(jobdeckDeviceRequestScope("GET", "/state"), JOBDECK_AUTH_SCOPES.STATE_READ);
+  assert.equal(jobdeckDeviceRequestScope("POST", "/browser/command"), JOBDECK_AUTH_SCOPES.BROWSER_OPERATE);
+  assert.equal(jobdeckDeviceRequestScope("POST", "/jobs/discover-current"), JOBDECK_AUTH_SCOPES.JOBS_MANAGE);
+  assert.equal(jobdeckDeviceRequestScope("POST", "/boss/draft-reply"), JOBDECK_AUTH_SCOPES.MESSAGES_DRAFT);
+  assert.equal(jobdeckDeviceRequestScope("POST", "/actions/action-1/approve"), JOBDECK_AUTH_SCOPES.ACTIONS_DECIDE);
+  assert.equal(jobdeckDeviceRequestScope("POST", "/provider"), null);
+  assert.equal(jobdeckDeviceRequestScope("PATCH", "/candidate"), null);
+  assert.equal(jobdeckDeviceRequestScope("POST", "/chat"), null);
+  assert.equal(jobdeckDeviceRequestScope("GET", "/export"), null);
+});
+
+test("extension WebSocket accepts device token only through the subprotocol", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-tenants-"));
+  try {
+    const manager = new TenantRuntimeManager({ directory, sub2api: fakeAccounts(), multiUser: false });
+    const server = new EventEmitter();
+    manager.attach(server);
+    let accepted = 0;
+    manager.local.bridge.acceptUpgrade = () => { accepted += 1; };
+    const socket = () => ({
+      output: "",
+      destroyed: false,
+      write(value) { this.output += value; },
+      destroy() { this.destroyed = true; }
+    });
+    const origin = `chrome-extension://${"a".repeat(32)}`;
+    const token = manager.local.store.secrets.extensionToken;
+
+    const querySocket = socket();
+    server.emit("upgrade", {
+      url: `/extension?token=${encodeURIComponent(token)}`,
+      headers: { origin, "sec-websocket-protocol": "jobdeck" }
+    }, querySocket, Buffer.alloc(0));
+    assert.equal(querySocket.destroyed, true);
+    assert.match(querySocket.output, /401 Unauthorized/);
+    assert.equal(accepted, 0);
+
+    const protocolSocket = socket();
+    server.emit("upgrade", {
+      url: "/extension",
+      headers: { origin, "sec-websocket-protocol": `jobdeck, token.${token}` }
+    }, protocolSocket, Buffer.alloc(0));
+    assert.equal(protocolSocket.destroyed, false);
+    assert.equal(accepted, 1);
     manager.close();
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

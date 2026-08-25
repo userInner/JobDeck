@@ -24,9 +24,11 @@ document.querySelector("#form").addEventListener("submit", async (event) => {
     const api = new URL(apiUrl.value.trim());
     const bridge = new URL(bridgeUrl.value.trim());
     const local = ["127.0.0.1", "localhost", "::1"].includes(api.hostname);
+    if (!local && api.origin !== "https://job.aibro.vip") throw new Error("远程工作台仅支持 https://job.aibro.vip");
     if (!local && api.protocol !== "https:") throw new Error("远程 Web 工作台必须使用 HTTPS");
     if (!local && bridge.protocol !== "wss:") throw new Error("远程执行通道必须使用 WSS");
     if (api.hostname !== bridge.hostname) throw new Error("Web 工作台与执行通道必须使用同一域名");
+    if (bridge.pathname !== "/extension" || bridge.search || bridge.hash) throw new Error("执行通道必须使用 /extension，且令牌不能放在 URL 中");
     const accessToken = token.value.trim();
     if (!local && accessToken.length < 24) throw new Error("插件连接码至少需要 24 个字符");
     if (!/^[A-Za-z0-9._~-]+$/.test(accessToken)) throw new Error("令牌只能包含字母、数字和 . _ ~ -");

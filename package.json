@@ -1,6 +1,6 @@
 {
   "name": "jobdeck-local",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "private": true,
   "type": "module",
   "description": "Local-first AI job search workspace with a real-Chrome extension.",
