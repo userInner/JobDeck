@@ -5,12 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>JobDeck · 本地 AI 求职驾驶舱</title>
+    <link rel="stylesheet" href="design-tokens.css" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <section id="authGate" class="auth-gate" aria-labelledby="authTitle" hidden>
       <form id="authForm" class="auth-card">
-        <p class="eyebrow">SECURE WORKSPACE</p>
+        <p class="eyebrow">安全工作区</p>
         <h1 id="authTitle">登录 JobDeck 工作台</h1>
         <p id="authMessage">登录后进入你的独立求职工作区。</p>
         <div id="legacyAuthFields">
@@ -22,7 +23,7 @@
     </section>
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>LOCAL JOB DESK</small></div></div>
+        <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>AI 求职工作台</small></div></div>
         <nav aria-label="主导航">
           <button class="nav-item active" data-view="dashboard" type="button"><span>⌂</span>工作台</button>
           <button class="nav-item" data-view="assistant" type="button"><span>✦</span>AI 助手</button>
@@ -38,7 +39,7 @@
 
       <main class="main">
         <header class="masthead">
-          <div><p class="kicker">JOB SEARCH OPERATIONS</p><h1 id="pageTitle">今天先做对的岗位</h1></div>
+          <div><p class="kicker">求职工作台</p><h1 id="pageTitle">今天先做对的岗位</h1></div>
           <div class="system-state">
             <span id="modelState" class="state-pill off">模型未配置</span>
             <span id="chromeState" class="state-pill off">Chrome 未连接</span>
@@ -55,7 +56,7 @@
         <section id="view-dashboard" class="view active">
           <section class="workflow-card" aria-labelledby="workflowTitle">
             <div class="workflow-copy">
-              <p class="eyebrow">FIRST RUN · BOSS ZHIPIN</p>
+              <p class="eyebrow">BOSS 直聘自动流程</p>
               <h2 id="workflowTitle">从在线简历开始，而不是盲投</h2>
               <p id="workflowStatus">首次运行会自动打开并审查 BOSS 在线简历，完成后再进入职位搜索。</p>
               <div id="workflowActions" class="button-row workflow-main-actions"></div>
@@ -91,7 +92,7 @@
 
           <div class="dashboard-grid">
             <section class="panel action-panel">
-              <div class="panel-head"><div><p class="eyebrow">CURRENT CHROME PAGE</p><h2>从正在看的岗位开始</h2></div><span id="activePageLabel" class="muted">尚未读取</span></div>
+              <div class="panel-head"><div><p class="eyebrow">当前页面</p><h2>从正在看的岗位开始</h2></div><span id="activePageLabel" class="muted">尚未读取</span></div>
               <div class="action-stage">
                 <p>在 Chrome 打开一条职位详情，JobDeck 会读取页面、保存 JD、检查重复，再交给 AI 做匹配分析。</p>
                 <div class="button-row">
@@ -103,17 +104,17 @@
             </section>
 
             <section class="panel approval-panel">
-              <div class="panel-head"><div><p class="eyebrow">HUMAN APPROVAL</p><h2>等待你确认</h2></div><span id="pendingBadge" class="count-badge">0</span></div>
+              <div class="panel-head"><div><p class="eyebrow">操作确认</p><h2>等待你确认</h2></div><span id="pendingBadge" class="count-badge">0</span></div>
               <div id="dashboardQueue" class="compact-list"></div>
             </section>
 
             <section class="panel jobs-panel">
-              <div class="panel-head"><div><p class="eyebrow">TOP MATCHES</p><h2>优先处理</h2></div><button class="plain-link" data-go="jobs" type="button">查看全部</button></div>
+              <div class="panel-head"><div><p class="eyebrow">匹配岗位</p><h2>优先处理</h2></div><button class="plain-link" data-go="jobs" type="button">查看全部</button></div>
               <div id="topJobs" class="job-list"></div>
             </section>
 
             <section class="panel activity-panel">
-              <div class="panel-head"><div><p class="eyebrow">LOCAL ACTIVITY</p><h2>最近动态</h2></div></div>
+              <div class="panel-head"><div><p class="eyebrow">执行记录</p><h2>最近动态</h2></div></div>
               <div id="recentActivity" class="activity-list"></div>
             </section>
           </div>
@@ -122,7 +123,7 @@
         <section id="view-assistant" class="view assistant-view">
           <div class="assistant-layout">
             <aside class="mode-panel">
-              <p class="eyebrow">CONVERSATION MODE</p>
+              <p class="eyebrow">对话模式</p>
               <button class="mode active" data-mode="general" type="button"><strong>求职策略</strong><small>定位、计划与下一步</small></button>
               <button class="mode" data-mode="matching" type="button"><strong>岗位分析</strong><small>匹配度与硬性缺口</small></button>
               <button class="mode" data-mode="resume" type="button"><strong>简历优化</strong><small>重写与关键词调整</small></button>
@@ -141,7 +142,7 @@
 
         <section id="view-jobs" class="view">
           <div class="section-toolbar">
-            <div><p class="eyebrow">JOB PIPELINE</p><h2>岗位池</h2></div>
+            <div><p class="eyebrow">岗位进度</p><h2>岗位池</h2></div>
             <div class="toolbar-actions"><select id="jobFilter"><option value="all">全部状态</option><option value="captured">待分析</option><option value="analyzed">已分析</option><option value="sent">已沟通</option><option value="skipped">已跳过</option></select><button id="captureJobSecondary" class="primary" type="button">捕获当前岗位</button></div>
           </div>
           <div id="allJobs" class="all-jobs"></div>
@@ -150,7 +151,7 @@
         <section id="view-resume" class="view">
           <div class="resume-layout">
             <section class="panel resume-editor">
-              <div class="panel-head"><div><p class="eyebrow">SOURCE OF TRUTH</p><h2>候选人资料与简历</h2></div><button id="saveResume" class="primary" type="button">保存资料</button></div>
+              <div class="panel-head"><div><p class="eyebrow">候选人资料</p><h2>简历与求职信息</h2></div><button id="saveResume" class="primary" type="button">保存资料</button></div>
               <div class="form-grid">
                 <label><span>求职状态</span><input id="candidateStatus" /></label>
                 <label><span>GitHub</span><input id="candidateGithub" /></label>
@@ -159,7 +160,7 @@
               </div>
             </section>
             <aside class="panel fact-panel">
-              <div class="panel-head"><div><p class="eyebrow">VERIFIED FACTS</p><h2>可直接使用的事实</h2></div></div>
+              <div class="panel-head"><div><p class="eyebrow">事实边界</p><h2>可直接使用的事实</h2></div></div>
               <div id="facts" class="fact-list"></div>
               <p class="fact-help">AI 只基于这些事实和简历正文进行表达，不会补写不存在的经历。</p>
             </aside>
@@ -168,7 +169,7 @@
 
         <section id="view-automation" class="view">
           <section class="panel task-composer">
-            <div class="panel-head"><div><p class="eyebrow">PAGE TASK</p><h2>告诉 AI 当前页面要做什么</h2></div><span class="muted">只生成操作，执行前逐条确认</span></div>
+            <div class="panel-head"><div><p class="eyebrow">页面任务</p><h2>告诉 AI 当前页面要做什么</h2></div><span class="muted">只生成操作，执行前逐条确认</span></div>
             <form id="browserTaskForm" class="task-form">
               <textarea id="browserTask" rows="3" placeholder="例如：把上面生成的招呼语填写到聊天输入框；或找到简历中的项目经历编辑入口。"></textarea>
               <button class="primary" type="submit">读取页面并生成计划</button>
@@ -177,11 +178,11 @@
           </section>
           <div class="automation-grid">
             <section class="panel">
-              <div class="panel-head"><div><p class="eyebrow">ACTION QUEUE</p><h2>浏览器操作队列</h2></div><span id="automationCount" class="count-badge">0</span></div>
+              <div class="panel-head"><div><p class="eyebrow">操作队列</p><h2>浏览器操作</h2></div><span id="automationCount" class="count-badge">0</span></div>
               <div id="automationQueue" class="action-list"></div>
             </section>
             <section class="panel">
-              <div class="panel-head"><div><p class="eyebrow">RECENT RESULTS</p><h2>执行记录</h2></div></div>
+              <div class="panel-head"><div><p class="eyebrow">运行结果</p><h2>执行记录</h2></div></div>
               <div id="actionHistory" class="history-list"></div>
             </section>
           </div>
@@ -190,7 +191,7 @@
         <section id="view-settings" class="view">
           <div class="settings-grid">
             <section class="panel settings-panel account-panel">
-              <div class="panel-head"><div><p class="eyebrow">JOBDECK ACCOUNT</p><h2>工作区账号与 Star 奖励</h2></div><span id="accountConnection" class="muted">正在连接账号服务</span></div>
+              <div class="panel-head"><div><p class="eyebrow">JobDeck 账号</p><h2>账号与 Star 奖励</h2></div><span id="accountConnection" class="muted">正在连接账号服务</span></div>
               <div id="accountLoggedOut" class="account-body">
                 <div class="account-columns">
                   <form id="accountLoginForm" class="settings-form compact-form">
@@ -211,23 +212,18 @@
               <div id="accountLoggedIn" class="account-body" hidden>
                 <div class="account-summary"><div><small>当前 AI 账号</small><strong id="accountIdentity">—</strong><span id="accountBalance">—</span></div><div class="button-row"><button id="copyExtensionToken" type="button">复制插件连接码</button><button id="accountLogout" type="button">退出登录</button></div></div>
                 <section id="starRewardCard" class="star-reward-card">
-                  <div><p class="eyebrow">GITHUB STAR REWARD</p><h3>Star JobDeck，领取 $5 AI 额度</h3><p>无需 GitHub OAuth。用公开 Gist 的一次性文本证明 GitHub 账号归属，验证 Star 后奖励只发放一次。</p></div>
+                  <div><p class="eyebrow">GitHub Star 奖励</p><h3>Star JobDeck，领取 $5 AI 额度</h3><p>填写 GitHub 用户名并上传仓库已 Star 的截图。系统会核对公开 Star、截图与领取记录，原图不会保存在服务器。</p></div>
                   <div id="starRewardForm" class="reward-controls">
                     <label><span>GitHub 用户名</span><input id="rewardGithubUsername" autocomplete="off" /></label>
-                    <button id="createStarChallenge" class="primary" type="button">生成领取证明</button>
-                  </div>
-                  <div id="starProofStep" class="proof-step" hidden>
-                    <p>新建一个<strong>公开 Gist</strong>，文件名为 <code>jobdeck-star-proof.txt</code>，内容必须完整复制下面的一次性证明：</p>
-                    <pre id="starProofText"></pre>
-                    <a id="openGist" href="https://gist.github.com/" target="_blank" rel="noreferrer">打开 GitHub Gist</a>
-                    <label><span>公开 Gist 链接</span><input id="rewardGistUrl" type="url" placeholder="https://gist.github.com/..." /></label>
-                    <button id="claimStarReward" class="primary" type="button">验证并领取 $5</button>
+                    <label><span>Star 截图（PNG、JPEG 或 WebP，最大 4MB）</span><input id="rewardStarScreenshot" type="file" accept="image/png,image/jpeg,image/webp" /></label>
+                    <a id="openRewardRepository" href="https://github.com/userInner/JobDeck" target="_blank" rel="noreferrer">打开 JobDeck 仓库</a>
+                    <button id="claimStarScreenshot" class="primary" type="button">上传截图并领取 $5</button>
                   </div>
                 </section>
               </div>
             </section>
             <section class="panel settings-panel">
-              <div class="panel-head"><div><p class="eyebrow">AI PROVIDER</p><h2>模型连接</h2></div><span id="providerStorageHint" class="muted">密钥仅保存在你的 JobDeck 服务</span></div>
+              <div class="panel-head"><div><p class="eyebrow">模型服务</p><h2>模型连接</h2></div><span id="providerStorageHint" class="muted">密钥仅保存在你的 JobDeck 服务</span></div>
               <form id="providerForm" class="settings-form">
                 <label><span>接口模式</span><select id="providerMode"><option value="openai-responses">OpenAI Responses</option><option value="compatible-chat">OpenAI-compatible Chat</option></select></label>
                 <label><span>模型名称</span><input id="providerModel" placeholder="gpt-5.4" required /></label>
@@ -237,7 +233,7 @@
               </form>
             </section>
             <section class="panel settings-panel">
-              <div class="panel-head"><div><p class="eyebrow">SEARCH BRIEF</p><h2>求职目标</h2></div></div>
+              <div class="panel-head"><div><p class="eyebrow">求职范围</p><h2>求职目标</h2></div></div>
               <form id="targetForm" class="settings-form">
                 <label class="full"><span>目标岗位（每行一个）</span><textarea id="settingsRoles" rows="5"></textarea></label>
                 <label class="full"><span>目标地点（每行一个）</span><textarea id="settingsLocations" rows="3"></textarea></label>

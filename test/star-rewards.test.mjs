@@ -68,3 +68,62 @@ test("Star reward rejects a gist owned by a different GitHub account", async () 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Star reward accepts a valid screenshot after public Star verification without storing the image", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-star-"));
+  const rewarded = [];
+  const screenshot = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(512, 0x41)
+  ]);
+  const sub2api = {
+    rewardEnabled: true,
+    profile: async () => ({ id: 42, email: "user@example.com" }),
+    rewardUser: async (input) => rewarded.push(input)
+  };
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/users/octocat")) return Response.json({ id: 7, login: "octocat" });
+    if (url.includes("/users/octocat/starred")) return Response.json([{ full_name: "userInner/JobDeck" }]);
+    return Response.json({}, { status: 404 });
+  };
+  try {
+    const service = new StarRewardService({ sub2api, directory, fetchImpl, repository: "userInner/JobDeck", amount: 5 });
+    const result = await service.claimScreenshot("account-token", { username: "octocat", screenshot });
+
+    assert.equal(result.amount, 5);
+    assert.deepEqual(result.evidence, { type: "screenshot", mime: "image/png", bytes: screenshot.length });
+    assert.equal(rewarded.length, 1);
+
+    const files = fs.readdirSync(directory);
+    assert.deepEqual(files, ["star-rewards.json"]);
+    const ledger = JSON.parse(fs.readFileSync(path.join(directory, "star-rewards.json"), "utf8"));
+    assert.equal(ledger.rewards[0].evidenceType, "screenshot");
+    assert.equal(ledger.rewards[0].evidenceHash.length, 64);
+    assert.equal(ledger.rewards[0].status, "rewarded");
+
+    await assert.rejects(
+      () => service.claimScreenshot("account-token", { username: "octocat", screenshot }),
+      (error) => error instanceof StarRewardError && error.code === "ALREADY_REWARDED"
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Star reward rejects files that are not supported screenshots", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jobdeck-star-"));
+  const sub2api = {
+    rewardEnabled: true,
+    profile: async () => ({ id: 42 }),
+    rewardUser: async () => assert.fail("must not reward")
+  };
+  try {
+    const service = new StarRewardService({ sub2api, directory, fetchImpl: async () => Response.json({ id: 7, login: "octocat" }) });
+    await assert.rejects(
+      () => service.claimScreenshot("token", { username: "octocat", screenshot: Buffer.alloc(512, 0x41) }),
+      (error) => error instanceof StarRewardError && error.code === "SCREENSHOT_INVALID"
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -15,7 +15,6 @@ let accountAccessToken = sessionStorage.getItem(accountTokenKey) || "";
 let accountRefreshToken = sessionStorage.getItem(accountRefreshKey) || "";
 let accountConfig;
 let accountProfile;
-let starChallenge;
 
 const titles = {
   dashboard: "今天先做对的岗位",
@@ -82,7 +81,6 @@ function clearAccountSession() {
   accountAccessToken = "";
   accountRefreshToken = "";
   accountProfile = undefined;
-  starChallenge = undefined;
   sessionStorage.removeItem(accountTokenKey);
   sessionStorage.removeItem(accountRefreshKey);
 }
@@ -288,7 +286,7 @@ function renderResumeOptimization(optimization) {
     return "未处理";
   };
   return `<section class="resume-optimization">
-    <header><div><p class="eyebrow">AI RESUME REWRITE</p><h3>${appliesToThisDraft ? "已逐项核对的简历优化稿" : "待写入的简历优化稿"}</h3><p>${escapeHtml(optimization.summary || "已根据在线简历和审查结果生成。")}</p></div></header>
+    <header><div><p class="eyebrow">简历优化</p><h3>${appliesToThisDraft ? "已逐项核对的简历优化稿" : "待写入的简历优化稿"}</h3><p>${escapeHtml(optimization.summary || "已根据在线简历和审查结果生成。")}</p></div></header>
     <div class="resume-field-list">${(optimization.fields || []).map((field, index) => `<article class="resume-field-card">
       <div class="resume-field-meta"><span>${String(index + 1).padStart(2, "0")}</span><div><strong>${escapeHtml(field.label)}</strong><small>${escapeHtml(field.reason)}</small></div><em class="resume-field-state">${fieldState(field)}</em></div>
       ${field.currentSummary ? `<p class="resume-current"><b>${appliesToThisDraft && verified.has(field.key) ? "生成时问题" : "当前问题"}</b>${escapeHtml(field.currentSummary)}</p>` : ""}
@@ -301,7 +299,7 @@ function renderResumeOptimization(optimization) {
 function renderRankingBoard(jobs) {
   const dimension = (label, value) => `<span><i style="--score:${Number(value) || 0}%"></i><b>${label}</b><em>${Number(value) || 0}</em></span>`;
   return `<section class="ranking-board">
-    <header><div><p class="eyebrow">RANKED BY FULL JD</p><h3>${jobs.length} 个候选岗位</h3></div>
+    <header><div><p class="eyebrow">完整 JD 分析</p><h3>${jobs.length} 个候选岗位</h3></div>
       <div class="ranking-tools"><button data-ranking-action="recommended" type="button">仅选 70+</button><button data-ranking-action="all" type="button">全选</button><button data-ranking-action="clear" type="button">清空</button></div>
     </header>
     <div class="ranking-list">${jobs.map((job, index) => {
@@ -466,8 +464,8 @@ function renderAccount() {
     : "Star 奖励等待服务端启用";
   $("#starRewardForm").hidden = !reward.enabled;
   if (!reward.enabled) $("#starRewardCard p:not(.eyebrow)").textContent = "管理员配置 SUB2API_ADMIN_API_KEY 后即可开放一次性 $5 奖励；管理密钥不会下发到浏览器。";
-  $("#starProofStep").hidden = !starChallenge;
-  if (starChallenge) $("#starProofText").textContent = starChallenge.proof;
+  const repository = reward.repository || "userInner/JobDeck";
+  $("#openRewardRepository").href = `https://github.com/${repository}`;
 }
 
 function setValueUnlessFocused(selector, value) {
@@ -1047,30 +1045,26 @@ $("#accountLogout").addEventListener("click", async (event) => {
   toast("AI 账号已退出");
 });
 
-$("#createStarChallenge").addEventListener("click", async (event) => {
+$("#claimStarScreenshot").addEventListener("click", async (event) => {
   const username = $("#rewardGithubUsername").value.trim();
   if (!username) return toast("请填写 GitHub 用户名");
-  setBusy(event.currentTarget, true, "验证账号…");
-  try {
-    starChallenge = await accountApi("/api/rewards/github-star/challenge", { method: "POST", body: JSON.stringify({ username }) });
-    renderAccount();
-    await navigator.clipboard.writeText(starChallenge.proof).catch(() => {});
-    toast("一次性证明已生成并复制");
-  } catch (error) { toast(error.message); }
-  finally { setBusy(event.currentTarget, false); }
-});
-
-$("#claimStarReward").addEventListener("click", async (event) => {
-  if (!starChallenge) return toast("请先生成领取证明");
-  const gistUrl = $("#rewardGistUrl").value.trim();
-  if (!gistUrl) return toast("请填写公开 Gist 链接");
+  const screenshot = $("#rewardStarScreenshot").files?.[0];
+  if (!screenshot) return toast("请上传 Star 截图");
+  if (screenshot.size > 4 * 1024 * 1024) return toast("截图不能超过 4MB");
   setBusy(event.currentTarget, true, "正在核验…");
   try {
-    const result = await accountApi("/api/rewards/github-star/claim", {
+    const response = await fetch("/api/rewards/github-star/screenshot", {
       method: "POST",
-      body: JSON.stringify({ challengeId: starChallenge.challengeId, gistUrl })
+      headers: {
+        Authorization: `Bearer ${accountAccessToken}`,
+        "Content-Type": screenshot.type,
+        "X-GitHub-Username": username
+      },
+      body: screenshot
     });
-    starChallenge = undefined;
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "截图核验失败");
+    $("#rewardStarScreenshot").value = "";
     await loadAccountProfile();
     renderAccount();
     toast(`已发放 $${result.amount} AI 额度`);

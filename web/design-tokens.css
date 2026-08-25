@@ -1,0 +1,67 @@
+/* JobDeck Quiet UI tokens v1.0. Keep the Web and extension copies byte-identical. */
+:root {
+  --jd-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --jd-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --jd-color-canvas: #f6f8fa;
+  --jd-color-surface: #ffffff;
+  --jd-color-surface-subtle: #f3f4f6;
+  --jd-color-text: #1f2328;
+  --jd-color-text-muted: #59636e;
+  --jd-color-border: #d0d7de;
+  --jd-color-border-muted: #e5e7eb;
+  --jd-color-accent: #0f766e;
+  --jd-color-accent-hover: #115e59;
+  --jd-color-accent-soft: #ecfdf5;
+  --jd-color-accent-strong: #134e4a;
+  --jd-color-success: #1a7f37;
+  --jd-color-warning: #9a6700;
+  --jd-color-danger: #cf222e;
+  --jd-color-focus: #0f766e;
+  --jd-color-overlay: rgb(31 35 40 / 40%);
+
+  --jd-text-xs: 12px;
+  --jd-text-sm: 14px;
+  --jd-text-md: 16px;
+  --jd-text-lg: 20px;
+  --jd-text-xl: 24px;
+  --jd-leading-xs: 16px;
+  --jd-leading-sm: 20px;
+  --jd-leading-md: 24px;
+  --jd-leading-lg: 28px;
+  --jd-leading-xl: 32px;
+  --jd-weight-regular: 400;
+  --jd-weight-medium: 500;
+  --jd-weight-semibold: 600;
+
+  --jd-space-1: 4px;
+  --jd-space-2: 8px;
+  --jd-space-3: 12px;
+  --jd-space-4: 16px;
+  --jd-space-6: 24px;
+  --jd-space-8: 32px;
+  --jd-space-10: 40px;
+  --jd-space-12: 48px;
+
+  --jd-radius-control: 6px;
+  --jd-radius-surface: 8px;
+  --jd-radius-pill: 999px;
+  --jd-control-sm: 32px;
+  --jd-control-md: 36px;
+  --jd-control-lg: 40px;
+  --jd-sidebar-width: 224px;
+  --jd-topbar-height: 56px;
+  --jd-content-max: 1200px;
+
+  --jd-shadow-overlay: 0 8px 24px rgb(31 35 40 / 12%);
+  --jd-focus-ring: 0 0 0 3px rgb(15 118 110 / 24%);
+  --jd-motion-fast: 120ms;
+  --jd-motion-overlay: 180ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --jd-motion-fast: 0ms;
+    --jd-motion-overlay: 0ms;
+  }
+}

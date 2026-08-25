@@ -5,6 +5,8 @@ import path from "node:path";
 
 const USERNAME_PATTERN = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i;
 const CHALLENGE_TTL_MS = 30 * 60 * 1000;
+const SCREENSHOT_MIN_BYTES = 256;
+const SCREENSHOT_MAX_BYTES = 4 * 1024 * 1024;
 
 export class StarRewardError extends Error {
   constructor(message, status = 400, code = "STAR_REWARD_ERROR") {
@@ -21,6 +23,14 @@ function accountId(profile) {
 
 function safeSlug(value) {
   return String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
+}
+
+function screenshotMime(buffer) {
+  if (!Buffer.isBuffer(buffer)) return "";
+  if (buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return "";
 }
 
 export class StarRewardService {
@@ -138,6 +148,62 @@ export class StarRewardService {
     return false;
   }
 
+  async rewardVerified({ profile, githubUser, evidenceType, evidenceHash = "" }) {
+    const userId = accountId(profile);
+    const duplicate = this.ledger.rewards.find((item) => String(item.sub2apiUserId) === userId || item.githubUserId === githubUser.id);
+    if (duplicate?.status === "rewarded") throw new StarRewardError("该 AI 账号或 GitHub 账号已经领取过奖励", 409, "ALREADY_REWARDED");
+    if (duplicate?.status === "pending" && (String(duplicate.sub2apiUserId) !== userId || duplicate.githubUserId !== githubUser.id)) {
+      throw new StarRewardError("该 AI 账号或 GitHub 账号已有奖励正在处理", 409, "REWARD_PENDING");
+    }
+    if (evidenceHash) {
+      const reused = this.ledger.rewards.find((item) => item.evidenceHash === evidenceHash
+        && (String(item.sub2apiUserId) !== userId || item.githubUserId !== githubUser.id));
+      if (reused) throw new StarRewardError("这张截图已经用于其他账号领取", 409, "SCREENSHOT_REUSED");
+    }
+
+    const rewardCode = `jobdeck-star-${safeSlug(this.repository)}-${githubUser.id}-${safeSlug(userId)}`;
+    const reward = duplicate || {
+      id: crypto.randomUUID(), sub2apiUserId: userId, githubUserId: githubUser.id,
+      githubUsername: githubUser.login, repository: this.repository, amount: this.amount,
+      rewardCode, status: "pending", createdAt: new Date(this.now()).toISOString()
+    };
+    if (!duplicate) this.ledger.rewards.push(reward);
+    reward.status = "pending";
+    reward.evidenceType = evidenceType;
+    if (evidenceHash) reward.evidenceHash = evidenceHash;
+    reward.lastAttemptAt = new Date(this.now()).toISOString();
+    this.save();
+
+    await this.sub2api.rewardUser({
+      userId,
+      amount: this.amount,
+      rewardCode,
+      notes: `JobDeck GitHub Star reward: ${githubUser.login} starred ${this.repository}`
+    });
+    reward.status = "rewarded";
+    reward.rewardedAt = new Date(this.now()).toISOString();
+    this.save();
+    return { amount: this.amount, repository: this.repository, githubUsername: githubUser.login, rewardedAt: reward.rewardedAt };
+  }
+
+  async claimScreenshot(accessToken, { username, screenshot }) {
+    const profile = await this.authenticatedProfile(accessToken);
+    const normalized = String(username || "").trim();
+    if (!USERNAME_PATTERN.test(normalized)) throw new StarRewardError("GitHub 用户名格式不正确");
+    if (!Buffer.isBuffer(screenshot) || screenshot.length < SCREENSHOT_MIN_BYTES) {
+      throw new StarRewardError("请上传清晰的 Star 截图", 400, "SCREENSHOT_REQUIRED");
+    }
+    if (screenshot.length > SCREENSHOT_MAX_BYTES) throw new StarRewardError("截图不能超过 4MB", 413, "SCREENSHOT_TOO_LARGE");
+    const mime = screenshotMime(screenshot);
+    if (!mime) throw new StarRewardError("截图仅支持 PNG、JPEG 或 WebP", 415, "SCREENSHOT_INVALID");
+
+    const githubUser = await this.github(`/users/${encodeURIComponent(normalized)}`);
+    if (!(await this.hasStar(githubUser.login))) throw new StarRewardError(`请先公开 Star ${this.repository} 后再领取`, 409, "STAR_NOT_FOUND");
+    const evidenceHash = crypto.createHash("sha256").update(screenshot).digest("hex");
+    const result = await this.rewardVerified({ profile, githubUser, evidenceType: "screenshot", evidenceHash });
+    return { ...result, evidence: { type: "screenshot", mime, bytes: screenshot.length } };
+  }
+
   async claim(accessToken, { challengeId, gistUrl }) {
     const profile = await this.authenticatedProfile(accessToken);
     const userId = accountId(profile);
@@ -154,32 +220,13 @@ export class StarRewardService {
     if (actualHash !== challenge.tokenHash) throw new StarRewardError("Gist 中的一次性证明不匹配");
     if (!(await this.hasStar(challenge.githubUsername))) throw new StarRewardError(`请先公开 Star ${this.repository} 后再领取`, 409, "STAR_NOT_FOUND");
 
-    const duplicate = this.ledger.rewards.find((item) => String(item.sub2apiUserId) === userId || item.githubUserId === challenge.githubUserId);
-    if (duplicate?.status === "rewarded") throw new StarRewardError("该 AI 账号或 GitHub 账号已经领取过奖励", 409, "ALREADY_REWARDED");
-    if (duplicate?.status === "pending" && (String(duplicate.sub2apiUserId) !== userId || duplicate.githubUserId !== challenge.githubUserId)) {
-      throw new StarRewardError("该 AI 账号或 GitHub 账号已有奖励正在处理", 409, "REWARD_PENDING");
-    }
-    const rewardCode = `jobdeck-star-${safeSlug(this.repository)}-${challenge.githubUserId}-${safeSlug(userId)}`;
-    const reward = duplicate || {
-      id: crypto.randomUUID(), sub2apiUserId: userId, githubUserId: challenge.githubUserId,
-      githubUsername: challenge.githubUsername, repository: this.repository, amount: this.amount,
-      rewardCode, status: "pending", createdAt: new Date(this.now()).toISOString()
-    };
-    if (!duplicate) this.ledger.rewards.push(reward);
-    reward.status = "pending";
-    reward.lastAttemptAt = new Date(this.now()).toISOString();
-    this.save();
-
-    await this.sub2api.rewardUser({
-      userId,
-      amount: this.amount,
-      rewardCode,
-      notes: `JobDeck GitHub Star reward: ${challenge.githubUsername} starred ${this.repository}`
+    const result = await this.rewardVerified({
+      profile,
+      githubUser: { id: challenge.githubUserId, login: challenge.githubUsername },
+      evidenceType: "gist"
     });
-    reward.status = "rewarded";
-    reward.rewardedAt = new Date(this.now()).toISOString();
     delete this.ledger.challenges[challenge.id];
     this.save();
-    return { amount: this.amount, repository: this.repository, githubUsername: challenge.githubUsername, rewardedAt: reward.rewardedAt };
+    return result;
   }
 }

@@ -4,11 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>JobDeck 求职执行器</title>
+    <link rel="stylesheet" href="design-tokens.css" />
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
     <header>
-      <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>REAL CHROME RUNNER</small></div></div>
+      <div class="brand"><span>JD</span><div><strong>JobDeck</strong><small>Chrome 求职执行器</small></div></div>
       <button id="pause" class="pause" type="button">暂停</button>
     </header>
     <main>
@@ -19,7 +20,7 @@
       </section>
 
       <section id="setup" class="setup hidden">
-        <p class="eyebrow">FIRST CONNECTION</p>
+        <p class="eyebrow">首次连接</p>
         <h1>连接本机求职工作台</h1>
         <p>先启动 JobDeck 本地应用，然后连接。扩展使用你当前的 Chrome 登录态，不会读取个人资料目录。</p>
         <button id="pair" class="primary wide" type="button">连接本机 JobDeck</button>
@@ -32,7 +33,7 @@
           <button id="siteToggle" type="button">允许此站点</button>
         </section>
         <section id="bossTools" class="boss-tools hidden">
-          <div><p class="eyebrow">BOSS ZHIPIN ADAPTER</p><strong id="bossPageType">已启用专用解析</strong><small id="bossContext">等待读取当前页面</small></div>
+          <div><p class="eyebrow">BOSS 直聘适配器</p><strong id="bossPageType">已启用专用解析</strong><small id="bossContext">等待读取当前页面</small></div>
           <button id="draftBossReply" class="hidden" type="button">起草当前回复</button>
           <p id="bossNote"></p>
         </section>
@@ -42,15 +43,15 @@
           <button id="discover" class="quick wide-quick" type="button"><span>⌕</span>扫描当前搜索结果中的岗位</button>
         </section>
         <section class="block">
-          <div class="block-head"><div><p class="eyebrow">APPROVAL QUEUE</p><h2>待你确认</h2></div><span id="count">0</span></div>
+          <div class="block-head"><div><p class="eyebrow">操作确认</p><h2>待你确认</h2></div><span id="count">0</span></div>
           <div id="queue" class="queue"></div>
         </section>
         <section class="block page-block">
-          <div class="block-head"><div><p class="eyebrow">LIVE PAGE</p><h2>最近读取的页面</h2></div></div>
+          <div class="block-head"><div><p class="eyebrow">当前页面</p><h2>最近读取</h2></div></div>
           <div id="page" class="page"></div>
         </section>
         <section class="block log-block">
-          <div class="block-head"><div><p class="eyebrow">LOCAL LOG</p><h2>最近操作</h2></div></div>
+          <div class="block-head"><div><p class="eyebrow">本地记录</p><h2>最近操作</h2></div></div>
           <div id="history" class="history"></div>
         </section>
       </section>

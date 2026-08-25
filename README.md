@@ -120,7 +120,7 @@ STAR_REWARD_USD=5
 GITHUB_TOKEN=可选的服务端 GitHub Token
 ```
 
-领取者先登录 AI 账号，再生成一次性证明并放入公开 Gist。JobDeck 会核对 Gist 所有者、公开 Star、AI 账号和历史奖励流水，全部通过后调用 Sub2API 管理接口加 $5。每个 GitHub 账号和 AI 账号只能领取一次；稳定的幂等编号可防止网络重试导致重复加款。`SUB2API_ADMIN_API_KEY` 和可选的 `GITHUB_TOKEN` 仅保存在服务器环境中，绝不会返回给 Web 页面。
+领取者登录 AI 账号后填写 GitHub 用户名，并上传仓库已 Star 的 PNG、JPEG 或 WebP 截图。JobDeck 会核对公开 Star、截图指纹、AI 账号和历史奖励流水，全部通过后调用 Sub2API 管理接口加 $5。服务器只记录截图哈希、格式和大小，不保存截图原图。每个 GitHub 账号和 AI 账号只能领取一次；稳定的幂等编号可防止网络重试导致重复加款。`SUB2API_ADMIN_API_KEY` 和可选的 `GITHUB_TOKEN` 仅保存在服务器环境中，绝不会返回给 Web 页面。
 
 相关接口：
 
@@ -132,6 +132,7 @@ POST /api/account/login
 GET  /api/account/me
 POST /api/rewards/github-star/challenge
 POST /api/rewards/github-star/claim
+POST /api/rewards/github-star/screenshot
 ```
 
 安全约束：
@@ -184,6 +185,10 @@ docker compose --env-file .env -f deploy/compose.existing-proxy.yaml up -d --bui
 删除该目录会清空本地状态。工作台支持导出不含密钥的数据。
 
 ## 开发与测试
+
+### 设计系统
+
+Web 工作台与 Chrome 扩展统一遵循 [JobDeck Quiet UI 设计规范](docs/DESIGN_SYSTEM.md)。颜色、字号、间距、圆角、焦点和动效由 `web/design-tokens.css` 与 `extension/design-tokens.css` 提供；两份 token 必须保持一致，自动测试会阻止视觉基础悄悄分叉。
 
 ```bash
 npm run check

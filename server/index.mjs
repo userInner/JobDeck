@@ -161,6 +161,19 @@ app.post("/api/rewards/github-star/claim", rateLimit("star-claim", 8, 60 * 60_00
   } catch (error) { accountError(res, error); }
 });
 
+app.post("/api/rewards/github-star/screenshot", rateLimit("star-screenshot", 5, 60 * 60_000), express.raw({
+  type: ["image/png", "image/jpeg", "image/webp"],
+  limit: "4mb"
+}), async (req, res) => {
+  try {
+    if (!starRewards.enabled) return res.status(503).json({ error: "Star 奖励尚未启用", code: "REWARD_DISABLED" });
+    res.json(await starRewards.claimScreenshot(accountToken(req), {
+      username: req.get("x-github-username"),
+      screenshot: req.body
+    }));
+  } catch (error) { accountError(res, error); }
+});
+
 app.use("/api", (req, res, next) => {
   if (req.path === "/health") return next();
   tenantRuntime.middleware()(req, res, next);
