@@ -113,8 +113,10 @@ export function jobAnalysisPrompt(job, candidate) {
   "strengths": ["最多3条"],
   "gaps": ["最多3条"],
   "summary": "80字以内",
-  "greeting": "80到180字的定制招呼；即使判断为跳过也生成一条真实、克制的版本，供用户最终决定"
+  "greeting": "90到150字的单段定制招呼；即使判断为跳过也生成一条真实、克制的版本，供用户最终决定"
 }
+
+${recruiterGreetingRules()}
 
 岗位标题：${job.title || "未知"}
 公司：${job.company || "未知"}
@@ -142,7 +144,7 @@ export function jobCompatibilityPrompt(job, candidate) {
   "matchedStack": ["最多5个与 JD 直接对应的真实技术点"],
   "hardGaps": ["最多3个明确硬性缺口"],
   "summary": "80字以内的匹配判断",
-  "greeting": "80到180字、针对该 JD 的独立招呼语；不匹配时留空"
+  "greeting": "90到150字、针对该 JD 的单段独立招呼语；不匹配时留空"
 }
 
 判断规则：
@@ -152,8 +154,47 @@ export function jobCompatibilityPrompt(job, candidate) {
 - 薪资或地点不得作为拒绝依据；仅在岗位要求纯算法博士、明确多年硬性经验、或核心技术方向明显不相干时判为不匹配。
 - 招呼语必须引用该岗位真实要求与候选人的对应证据，不得批量复用模板，不得虚构经历。
 
+${recruiterGreetingRules()}
+
 候选人证据：
 ${evidence}
+
+岗位标题：${job.title || "未知"}
+公司：${job.company || "未知"}
+地点/薪资：${job.location || "未知"} / ${job.salary || "未知"}
+完整 JD：
+${String(job.description || "").slice(0, 15000)}`;
+}
+
+export function recruiterGreetingRules() {
+  return `招呼语写作标准：
+- 写成 90 到 150 字的一个自然段，最多三句话；使用职业化口吻，不使用 Markdown、项目符号、换行或表情。
+- 第一句必须点出这个 JD 独有的业务场景、产品目标或工程任务，不能只说“岗位与我匹配”或复述职位名称。
+- 中间只选择最能回应 JD 的 2 到 3 条已核实证据，并说明对应关系；不要罗列完整技术栈。
+- 正式经历用“正式工作中”，OnPeople 用“独立开发”，Cherry Studio 用“开源贡献”，不得混淆身份。
+- 结尾使用自然、低压力的行动邀请，例如“如果方向合适，方便进一步沟通吗？”，不要索要隐私或擅自承诺面试时间。
+- 禁止“老板你好”“非常想加入你们”“可以看下我的简历，期待回复”等平台默认话术；禁止夸赞公司、空泛自评和连续堆砌技术名词。
+- 不复述薪资和城市；不声称拥有候选人档案中没有的行业经验。若只有迁移能力，直接说明相关工程经验可迁移到该业务。`;
+}
+
+export function recruiterGreetingPrompt(job, candidate, analysis, draft, issues = []) {
+  const facts = Array.isArray(candidate?.facts) && candidate.facts.length
+    ? candidate.facts.map((fact) => `- ${fact}`).join("\n")
+    : "- 尚未录入；不得自行补充候选人经历";
+  return `你是中国技术岗位的招聘沟通编辑。请重写一条 BOSS 直聘首轮招呼语，并只输出 JSON：
+{
+  "greeting": "最终可直接发送的招呼语"
+}
+
+${recruiterGreetingRules()}
+
+本次重写原因：${issues.length ? issues.join("；") : "进一步压缩并增强岗位针对性"}
+原草稿：${String(draft || "").slice(0, 1000)}
+匹配结论：${JSON.stringify(analysis || {})}
+
+候选人已核实事实：
+${facts}
+${candidate?.resumeText ? `\n简历正文：\n${candidate.resumeText.slice(0, 12000)}` : ""}
 
 岗位标题：${job.title || "未知"}
 公司：${job.company || "未知"}

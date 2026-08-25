@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { jobCompatibilityPrompt, resumeOptimizationPrompt } from "../server/prompts.mjs";
+import { jobCompatibilityPrompt, recruiterGreetingPrompt, resumeOptimizationPrompt } from "../server/prompts.mjs";
+import { normalizeRecruiterGreeting, recruiterGreetingIssues } from "../server/greeting.mjs";
 
 test("resume optimization keeps employment, independent projects and open source separate", () => {
   const prompt = resumeOptimizationPrompt({ sections: ["个人优势"], text: "在线简历" }, { score: 64 }, {
@@ -38,4 +39,34 @@ test("bulk compatibility mode uses a binary decision without score thresholds", 
   assert.doesNotMatch(prompt, /目标岗位：AI Agent 工程师/);
   assert.doesNotMatch(prompt, /目标地点：深圳/);
   assert.doesNotMatch(prompt, /薪资底线：25K/);
+  assert.match(prompt, /第一句必须点出这个 JD 独有的业务场景/);
+  assert.match(prompt, /正式经历用“正式工作中”/);
+  assert.match(prompt, /不要罗列完整技术栈/);
+});
+
+test("recruiter greeting rules reject generic BOSS copy and normalize visible noise", () => {
+  const normalized = normalizeRecruiterGreeting("**老板你好！** 非常想加入你们 😊\n可以看下我的简历，期待回复");
+  assert.equal(normalized, "您好，非常想加入你们 可以看下我的简历，期待回复");
+  assert.ok(recruiterGreetingIssues(normalized, { matchedStack: ["Go", "MCP"] }).length >= 3);
+});
+
+test("a concise JD-specific greeting passes the local quality gate", () => {
+  const greeting = "您好，看到岗位重点是将合同审查与知识库能力落到企业法务流程。我的正式工作以 Go 后端为主，并独立开发 OnPeople 的模型接入、MCP 工具调用和权限审批；这些工程经验可迁移到法务 AI 产品建设。如果方向合适，方便进一步沟通吗？";
+  assert.deepEqual(recruiterGreetingIssues(greeting, { matchedStack: ["Go", "MCP"] }), []);
+});
+
+test("greeting rewrite prompt carries the JD, evidence boundary and failed-quality reason", () => {
+  const prompt = recruiterGreetingPrompt({
+    title: "AI 全栈工程师",
+    company: "示例法务科技",
+    description: "负责合同审查和企业知识库"
+  }, {
+    facts: ["独立开发 OnPeople"]
+  }, {
+    matchedStack: ["Go", "MCP"]
+  }, "老板你好", ["包含平台默认或空泛话术"]);
+  assert.match(prompt, /合同审查和企业知识库/);
+  assert.match(prompt, /独立开发 OnPeople/);
+  assert.match(prompt, /包含平台默认或空泛话术/);
+  assert.match(prompt, /90 到 150 字/);
 });

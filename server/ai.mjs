@@ -1,5 +1,6 @@
 import OpenAI from "openai";
-import { agentRoutePrompt, agentStepPrompt, bossReplyPrompt, browserPlanPrompt, chatInstructions, jobAnalysisPrompt, jobCompatibilityPrompt, resumeAuditPrompt, resumeOptimizationPrompt } from "./prompts.mjs";
+import { agentRoutePrompt, agentStepPrompt, bossReplyPrompt, browserPlanPrompt, chatInstructions, jobAnalysisPrompt, jobCompatibilityPrompt, recruiterGreetingPrompt, resumeAuditPrompt, resumeOptimizationPrompt } from "./prompts.mjs";
+import { normalizeRecruiterGreeting, recruiterGreetingIssues } from "./greeting.mjs";
 
 function extractJson(text) {
   const clean = String(text).trim().replace(/^```json\s*/i, "").replace(/\s*```$/, "");
@@ -154,7 +155,7 @@ export class AIService {
     }
     const parsed = extractJson(text);
     const clamp = (value) => Math.max(0, Math.min(100, Number(value) || 0));
-    return {
+    const analysis = {
       score: clamp(parsed.score),
       verdict: ["推荐", "谨慎", "跳过"].includes(parsed.verdict) ? parsed.verdict : "谨慎",
       dimensions: {
@@ -167,8 +168,10 @@ export class AIService {
       strengths: Array.isArray(parsed.strengths) ? parsed.strengths.slice(0, 3) : [],
       gaps: Array.isArray(parsed.gaps) ? parsed.gaps.slice(0, 3) : [],
       summary: String(parsed.summary || "").slice(0, 300),
-      greeting: String(parsed.greeting || "").slice(0, 800)
+      greeting: normalizeRecruiterGreeting(parsed.greeting).slice(0, 800)
     };
+    analysis.greeting = await this.ensureRecruiterGreeting(job, analysis);
+    return analysis;
   }
 
   async matchJob(job) {
@@ -188,7 +191,7 @@ export class AIService {
     }
     const parsed = extractJson(text);
     const matches = parsed.matches === true;
-    return {
+    const analysis = {
       mode: "match-only",
       matches,
       verdict: matches ? "匹配" : "跳过",
@@ -196,8 +199,27 @@ export class AIService {
       matchedStack: Array.isArray(parsed.matchedStack) ? parsed.matchedStack.slice(0, 5).map(String) : [],
       hardGaps: Array.isArray(parsed.hardGaps) ? parsed.hardGaps.slice(0, 3).map(String) : [],
       summary: String(parsed.summary || "").slice(0, 300),
-      greeting: matches ? String(parsed.greeting || "").slice(0, 800) : ""
+      greeting: matches ? normalizeRecruiterGreeting(parsed.greeting).slice(0, 800) : ""
     };
+    if (matches) analysis.greeting = await this.ensureRecruiterGreeting(job, analysis);
+    return analysis;
+  }
+
+  async ensureRecruiterGreeting(job, analysis) {
+    let greeting = normalizeRecruiterGreeting(analysis?.greeting);
+    const issues = recruiterGreetingIssues(greeting, analysis);
+    if (!issues.length) return greeting;
+    try {
+      const parsed = await this.structured(
+        recruiterGreetingPrompt(job, this.store.state.candidate, analysis, greeting, issues),
+        "模型没有返回可用的定制招呼语"
+      );
+      const refined = normalizeRecruiterGreeting(parsed.greeting).slice(0, 800);
+      if (refined) greeting = refined;
+    } catch {
+      // Keep the truthful first draft when the optional quality rewrite fails.
+    }
+    return greeting;
   }
 
   async auditBossResume(resume) {
