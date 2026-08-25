@@ -23,7 +23,7 @@ test("automatic BOSS workflow does not directly navigate, open job URLs, or muta
   }
   assert.match(workflow, /kind:\s*["']computerClick["']/);
   assert.match(workflow, /kind:\s*["']computerType["']/);
-  assert.match(workflow, /selectSavedBossExpectation\(runId, tab\.id, page, expectationLabel\)/);
+  assert.match(workflow, /selectSavedBossExpectation\(runId, tab\.id, page, expectationLabel, \{ force: forceExpectation \}\)/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf("async function selectBossJobCard")), /selectExpectedBossLocation\(runId, tab\.id, page, location\)/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf("async function selectBossJobCard")), /bossSearchInput\(page\)/);
 });
@@ -146,9 +146,19 @@ test("saved BOSS expectations are selected directly without a second city workfl
   const start = source.indexOf("async function selectSavedBossExpectation");
   const end = source.indexOf("async function selectExpectedBossLocation", start);
   const selection = source.slice(start, end);
-  assert.match(selection, /expectation\.selected/);
+  assert.match(selection, /bossExpectationContextMatches/);
+  assert.match(selection, /waitForStableBossExpectation/);
   assert.doesNotMatch(selection, /selectExpectedBossLocation/);
   assert.doesNotMatch(selection, /filterMatches \|\| cardsMatch/);
+});
+
+test("verified contacts always restore the same saved expectation and visible city", () => {
+  assert.match(source, /function bossExpectationContextMatches/);
+  assert.match(source, /active\?\.label === expectationLabel/);
+  assert.match(source, /visibleLocation === desiredLocation/);
+  assert.match(source, /forceExpectation: true/);
+  assert.match(source, /applicationAttempted = false;[\s\S]{0,500}openBossJobList\(\{ \.\.\.plan, tabId, runId, forceExpectation: true \}\)/);
+  assert.match(source, /recoverBossListAfterCandidateError[\s\S]{0,1200}forceExpectation: true/);
 });
 
 test("BOSS city controls accept 市 suffixes and a wider real-Chrome filter strip", () => {

@@ -965,35 +965,60 @@ function savedBossExpectation(page, expectationLabel = "") {
   const options = (page?.boss?.expectationOptions || []).filter((item) => item.point && item.label);
   if (!options.length) return null;
   const exact = options.find((item) => item.label === expectationLabel);
-  return exact || options.find((item) => item.selected) || options[0];
+  if (expectationLabel) return exact || null;
+  return options.find((item) => item.selected) || options[0];
 }
 
-async function selectSavedBossExpectation(runId, tabId, page, expectationLabel = "") {
+function expectedBossLocation(expectation) {
+  const location = String(expectation?.location || "").trim();
+  return location === "远程" ? "全国" : location;
+}
+
+function bossExpectationContextMatches(page, expectationLabel, desiredLocation) {
+  const active = page?.boss?.activeExpectation;
+  const visibleLocation = String(page?.boss?.locationFilter?.label || "").trim();
+  return page?.adapter === "boss-zhipin"
+    && page?.pageType === "job-list"
+    && Boolean(page?.boss?.jobCards?.length)
+    && active?.label === expectationLabel
+    && (!desiredLocation || visibleLocation === desiredLocation);
+}
+
+async function waitForStableBossExpectation(runId, tabId, expectationLabel, desiredLocation, attempts = 16, requiredStableSamples = 3) {
+  let stableSamples = 0;
+  let lastPage = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!autopilotActive(runId)) throw new Error("托管投递已停止");
+    await sleep(attempt === 0 ? 800 : 550);
+    lastPage = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
+    const verification = verificationReason(lastPage);
+    if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
+    const matches = bossExpectationContextMatches(lastPage, expectationLabel, desiredLocation);
+    stableSamples = matches ? stableSamples + 1 : 0;
+    if (stableSamples >= requiredStableSamples) return lastPage;
+  }
+  const actualExpectation = lastPage?.boss?.activeExpectation?.label || "未识别";
+  const actualLocation = lastPage?.boss?.locationFilter?.label || "未识别";
+  throw new Error(`BOSS 求职期望未能稳定恢复：需要 ${expectationLabel} / ${desiredLocation || "任意城市"}，当前 ${actualExpectation} / ${actualLocation}`);
+}
+
+async function selectSavedBossExpectation(runId, tabId, page, expectationLabel = "", { force = false } = {}) {
   page = await exposeBossListHeader(runId, tabId, page);
   const expectation = savedBossExpectation(page, expectationLabel);
   if (!expectation) {
     throw new Error("没有识别到 BOSS 顶部已保存的求职期望。请先在 BOSS 添加包含岗位和城市的求职期望，再启动自动找工作");
   }
-  const hasJobList = page?.adapter === "boss-zhipin"
-    && page?.pageType === "job-list"
-    && Boolean(page?.boss?.jobCards?.length);
-  if (hasJobList && expectation.selected) {
+  const desiredLocation = expectedBossLocation(expectation);
+  if (!force && bossExpectationContextMatches(page, expectation.label, desiredLocation)) {
     return { page, expectation };
   }
   const point = centerOf(expectation, `求职期望 ${expectation.label}`);
-  setAutopilot({ message: `Computer Use 正在选择 BOSS 求职期望：${expectation.label}` });
+  setAutopilot({ message: `Computer Use 正在${force ? "重新" : ""}选择 BOSS 求职期望：${expectation.label}，并核对城市 ${desiredLocation}` });
   await bridge.execute({ kind: "computerMove", tabId, x: point.x, y: point.y, reason: `自动找工作：移动到求职期望 ${expectation.label}` });
-  await bridge.execute({ kind: "computerClick", tabId, x: point.x, y: point.y, reason: `自动找工作：选择求职期望 ${expectation.label}` });
+  await sleep(160);
+  await bridge.execute({ kind: "computerClick", tabId, x: point.x, y: point.y, reason: `自动找工作：${force ? "重新" : ""}选择求职期望 ${expectation.label}` });
 
-  let nextPage = await waitForBossPage(
-    runId,
-    (value) => value?.adapter === "boss-zhipin"
-      && value?.pageType === "job-list"
-      && Boolean(value?.boss?.jobCards?.length),
-    `求职期望 ${expectation.label} 的职位列表`,
-    10,
-    tabId
-  );
+  let nextPage = await waitForStableBossExpectation(runId, tabId, expectation.label, desiredLocation);
   nextPage = await exposeBossListHeader(runId, tabId, nextPage);
   return { page: nextPage, expectation };
 }
@@ -1151,7 +1176,7 @@ async function advanceBossJobResults(runId, tabId, seenUrls) {
   return null;
 }
 
-async function openBossJobList({ expectationLabel = "", tabId = null, runId = null, attempts = 20 } = {}) {
+async function openBossJobList({ expectationLabel = "", tabId = null, runId = null, attempts = 20, forceExpectation = false } = {}) {
   if (runId && !autopilotActive(runId)) throw new Error("托管投递已停止");
   let tab = Number.isInteger(tabId) && tabId > 0 ? { id: tabId } : null;
   let page;
@@ -1162,7 +1187,7 @@ async function openBossJobList({ expectationLabel = "", tabId = null, runId = nu
     tab = await bridge.execute({ kind: "openBossJobs" });
     page = await waitForBossList(runId, tab.id, "BOSS 职位列表", attempts);
   }
-  const selected = await selectSavedBossExpectation(runId, tab.id, page, expectationLabel);
+  const selected = await selectSavedBossExpectation(runId, tab.id, page, expectationLabel, { force: forceExpectation });
   page = selected.page;
   return {
     page,
@@ -1287,15 +1312,17 @@ async function recoverBossListAfterCandidateError(runId, tabId, plan, candidate)
   let current = await inspectBossPageFollowingTabs(tabId, ["job-list"]).catch(() => null);
   let page = current?.page || null;
   tabId = current?.tabId || tabId;
-  if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return { page, tabId };
-  try {
-    const restored = await restoreBossListAfterContact(runId, tabId, candidate);
-    if (restored?.page) return restored;
-  } catch (error) {
-    if (fatalAutopilotError(error)) throw error;
+  if (page?.adapter !== "boss-zhipin" || page?.pageType !== "job-list") {
+    try {
+      const restored = await restoreBossListAfterContact(runId, tabId, candidate);
+      page = restored?.page || page;
+      tabId = restored?.tabId || tabId;
+    } catch (error) {
+      if (fatalAutopilotError(error)) throw error;
+    }
   }
-  setAutopilot({ message: `正在恢复 BOSS 求职期望 ${plan.expectationLabel} 的职位列表，继续下一个岗位` });
-  return openBossJobList({ ...plan, tabId, runId });
+  setAutopilot({ message: `正在重新点击 BOSS 求职期望 ${plan.expectationLabel}，确认期望城市后再继续` });
+  return openBossJobList({ ...plan, tabId, runId, forceExpectation: true });
 }
 
 function upsertDetailedJob(page, preferredId, preferredUrl = "") {
@@ -1681,7 +1708,7 @@ async function runAutomaticJobSearch(runId, targetApplications) {
       try {
         const result = await openBossJobList({ ...plan, tabId, runId });
         tabId = result.tabId;
-        const activeLocation = result.effectiveLocation;
+        let activeLocation = result.effectiveLocation;
         let page = result.page;
         while (page && store.state.workflow.autopilot.sent < targetApplications) {
           // BOSS virtualizes and refreshes the result column whenever a detail
@@ -1737,9 +1764,14 @@ async function runAutomaticJobSearch(runId, targetApplications) {
                 const selected = store.state.workflow.autopilot.selected + 1;
                 setAutopilot({ selected, status: "running-apply", stage: "applying", message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在沟通 ${job.company} / ${job.title}` });
                 const application = await applyCurrentBossJob(runId, tabId, job);
-                page = application.page;
                 tabId = application.tabId;
-                setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已完成 ${store.state.workflow.autopilot.sent}/${targetApplications}，继续寻找匹配岗位` });
+                applicationAttempted = false;
+                setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已完成 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在重新选择 ${plan.expectationLabel} 并核对期望城市` });
+                const resumed = await openBossJobList({ ...plan, tabId, runId, forceExpectation: true });
+                page = resumed.page;
+                tabId = resumed.tabId;
+                activeLocation = resumed.effectiveLocation || activeLocation;
+                setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已恢复 ${plan.expectationLabel} / ${activeLocation}，继续寻找匹配岗位` });
               } else {
                 store.addActivity(`未点击立即沟通：${job.company} / ${job.title}（${analysis.summary || analysis.hardGaps?.join("、") || "岗位存在明确硬性冲突"}）`, "done");
               }
