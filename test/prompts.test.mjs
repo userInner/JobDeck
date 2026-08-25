@@ -87,3 +87,17 @@ test("greeting rules prefer verified OnPeople and Cherry Studio evidence when re
   assert.match(prompt, /5 万\+ Star、前 30 贡献者/);
   assert.match(prompt, /不要把这些事实套用给其他候选人/);
 });
+
+test("cross-industry greetings bridge verified engineering evidence to the JD domain", () => {
+  const prompt = recruiterGreetingPrompt({
+    title: "法律 AI 全栈工程师",
+    company: "示例法务科技",
+    description: "建设合同审查、企业知识库和智能法务工作流"
+  }, {
+    facts: ["正式工作使用 Go 开发分布式后端", "独立开发 OnPeople Agent 工作台"]
+  }, { matchedStack: ["Go", "Agent"] }, "原始招呼");
+
+  assert.match(prompt, /这些工程经验可以迁移到法律 AI 产品建设/);
+  assert.match(prompt, /从 JD 提取具体业务领域/);
+  assert.match(prompt, /不得暗示候选人已有该行业经验/);
+});
