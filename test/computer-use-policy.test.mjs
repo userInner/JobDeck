@@ -96,6 +96,15 @@ test("automatic BOSS workflow re-observes and replans intermediate pages", () =>
   assert.doesNotMatch(source.slice(source.indexOf("async function adaptiveBossComposer"), source.indexOf("function recordBossJobSent")), /bridge\.execute\(\{ kind: "click"/);
 });
 
+test("contact workflow follows a BOSS chat tab and never silently advances after an unverified apply", () => {
+  assert.match(source, /async function inspectBossPageFollowingTabs/);
+  assert.match(source, /preferredPageTypes = \[\]/);
+  assert.match(source, /tabId = transition\.tabId/);
+  assert.match(source, /BOSS_APPLY_NOT_VERIFIED/);
+  assert.match(source, /投递链路未完整验证，已暂停而不是跳到下一个 JD/);
+  assert.match(source, /applicationAttempted = true/);
+});
+
 test("automatic job search processes one card from each fresh page snapshot", () => {
   const start = source.indexOf("async function runAutomaticJobSearch");
   const end = source.indexOf("async function startAutopilotFromCurrentList", start);

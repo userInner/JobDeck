@@ -803,6 +803,82 @@ async function waitForBossPage(runId, predicate, description, attempts = 14, tab
   throw new Error(`${description}加载超时`);
 }
 
+function isBossTabUrl(value) {
+  try {
+    return /(^|\.)zhipin\.com$/i.test(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function bossTabPageHint(value) {
+  try {
+    const pathname = new URL(value).pathname;
+    if (/\/web\/geek\/chat|\/web\/chat/.test(pathname)) return "chat";
+    if (/\/web\/geek\/jobs|\/c\d+/.test(pathname)) return "job-list";
+    if (/\/job_detail\//.test(pathname)) return "job-detail";
+  } catch {
+    // The live inspection below remains the source of truth.
+  }
+  return "other";
+}
+
+async function inspectBossPageFollowingTabs(tabId, preferredPageTypes = []) {
+  const tabs = await bridge.execute({ kind: "listTabs" });
+  const bossTabs = tabs.filter((tab) => tab.id && isBossTabUrl(tab.url));
+  const preferred = new Set(preferredPageTypes);
+  const ordered = [...bossTabs].sort((left, right) => {
+    const leftPreferred = preferred.has(bossTabPageHint(left.url)) ? 1 : 0;
+    const rightPreferred = preferred.has(bossTabPageHint(right.url)) ? 1 : 0;
+    const leftActive = left.active ? 1 : 0;
+    const rightActive = right.active ? 1 : 0;
+    const leftOriginal = left.id === tabId ? 1 : 0;
+    const rightOriginal = right.id === tabId ? 1 : 0;
+    return rightPreferred - leftPreferred || rightActive - leftActive || rightOriginal - leftOriginal;
+  });
+
+  let fallback = null;
+  let lastError = null;
+  for (const tab of ordered) {
+    try {
+      const page = await bridge.execute({ kind: "inspect", tabId: tab.id });
+      if (page?.adapter !== "boss-zhipin") continue;
+      const result = { page, tabId: tab.id };
+      if (preferred.has(page.pageType)) {
+        if (!tab.active) await bridge.execute({ kind: "activateTab", tabId: tab.id });
+        return result;
+      }
+      if (!fallback || tab.id === tabId || tab.active) fallback = result;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (fallback) return fallback;
+  if (lastError) throw lastError;
+  throw new Error("没有可用的 BOSS 标签页，可能已被页面跳转关闭");
+}
+
+async function waitForBossPageFollowingTabs(runId, predicate, description, attempts, tabId, preferredPageTypes = []) {
+  let lastResult = null;
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!autopilotActive(runId)) throw new Error("托管投递已停止");
+    await sleep(attempt === 0 ? 700 : 550);
+    try {
+      lastResult = await inspectBossPageFollowingTabs(tabId, preferredPageTypes);
+      tabId = lastResult.tabId;
+      const verification = verificationReason(lastResult.page);
+      if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
+      if (predicate(lastResult.page)) return lastResult;
+    } catch (error) {
+      lastError = error;
+      if (fatalAutopilotError(error)) throw error;
+    }
+  }
+  if (lastError && !lastResult) throw lastError;
+  throw new Error(`${description}加载超时`);
+}
+
 function bossSearchInput(page) {
   const candidates = (page?.interactives || []).filter((item) => item.tag === "input" && !item.disabled);
   return candidates.find((item) => /搜索职位|搜索.*公司|职位.*公司/i.test(`${item.label || ""} ${item.selector || ""}`))
@@ -976,8 +1052,10 @@ async function waitForBossList(runId, tabId, description, attempts = 20) {
 }
 
 async function restoreBossListAfterContact(runId, tabId, job) {
-  let page = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
-  if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return page;
+  let current = await inspectBossPageFollowingTabs(tabId, ["job-list"]).catch(() => null);
+  let page = current?.page || null;
+  tabId = current?.tabId || tabId;
+  if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return { page, tabId };
 
   setAutopilot({ message: `已联系 ${job.company}，Computer Use 正在返回职位列表` });
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -996,10 +1074,12 @@ async function restoreBossListAfterContact(runId, tabId, job) {
       await bridge.execute({ kind: "computerBack", tabId, reason: "自动找工作：通过浏览器历史返回职位列表" });
     }
     await sleep(900);
-    page = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
+    current = await inspectBossPageFollowingTabs(tabId, ["job-list"]).catch(() => null);
+    page = current?.page || null;
+    tabId = current?.tabId || tabId;
     const verification = verificationReason(page);
     if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
-    if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return page;
+    if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return { page, tabId };
   }
   throw new Error(`${job.company} / ${job.title} 已完成沟通，但 Computer Use 连续尝试后仍无法返回职位列表`);
 }
@@ -1155,6 +1235,7 @@ function bossJobDetailMatches(page, candidate, beforeFingerprint = "") {
 }
 
 function fatalAutopilotError(error) {
+  if (error?.code === "BOSS_APPLY_NOT_VERIFIED") return true;
   return /本人处理|验证码|登录失效|扩展(?:未连接|不可用|未授权)|托管投递已停止|浏览器操作已暂停|模型服务不可用|API Key is not assigned to any group|Incorrect API key|API_KEY_GROUP_UNAVAILABLE/i
     .test(String(error?.message || error || ""));
 }
@@ -1188,11 +1269,13 @@ async function verifyAutopilotProvider(runId) {
 }
 
 async function recoverBossListAfterCandidateError(runId, tabId, plan, candidate) {
-  let page = await bridge.execute({ kind: "inspect", tabId }).catch(() => null);
+  let current = await inspectBossPageFollowingTabs(tabId, ["job-list"]).catch(() => null);
+  let page = current?.page || null;
+  tabId = current?.tabId || tabId;
   if (page?.adapter === "boss-zhipin" && page?.pageType === "job-list") return { page, tabId };
   try {
-    page = await restoreBossListAfterContact(runId, tabId, candidate);
-    if (page) return { page, tabId };
+    const restored = await restoreBossListAfterContact(runId, tabId, candidate);
+    if (restored?.page) return restored;
   } catch (error) {
     if (fatalAutopilotError(error)) throw error;
   }
@@ -1245,7 +1328,18 @@ async function adaptiveBossComposer(runId, tabId, job) {
   let contactRetries = 0;
   for (let turn = 1; turn <= 12; turn += 1) {
     if (!autopilotActive(runId)) throw new Error("托管投递已停止");
-    const page = await bridge.execute({ kind: "inspect", tabId });
+    let current;
+    try {
+      current = await inspectBossPageFollowingTabs(tabId, ["chat"]);
+    } catch (error) {
+      if (fatalAutopilotError(error)) throw error;
+      trace.push(`第${turn}步：等待 BOSS 新标签页（${error.message}）`);
+      setAutopilot({ message: `智能规划第 ${turn} 步：等待 BOSS 沟通页面加载` });
+      await sleep(550);
+      continue;
+    }
+    tabId = current.tabId;
+    const page = current.page;
     if (!page) {
       trace.push(`第${turn}步：页面暂时为空`);
       await sleep(450);
@@ -1254,7 +1348,7 @@ async function adaptiveBossComposer(runId, tabId, job) {
     const blocked = verificationReason(page);
     if (blocked) throw new Error(`BOSS 要求${blocked}，需要本人处理后继续`);
     const composer = bossComposerFromPage(page);
-    if (composer) return { page, composer, mode: "tailored" };
+    if (composer) return { page, composer, mode: "tailored", tabId };
 
     const controls = page.interactives || [];
     const platformGreetingSent = /已向BOSS发送消息|已发送招呼|消息已发送/.test(String(page.text || ""));
@@ -1347,6 +1441,7 @@ async function applyCurrentBossJob(runId, tabId, job) {
   await bridge.execute({ kind: "computerClick", tabId, x: contactPoint.x, y: contactPoint.y, reason: `已批准批次：联系 ${job.company} 的 ${job.title}` });
   await sleep(500);
   const transition = await adaptiveBossComposer(runId, tabId, job);
+  tabId = transition.tabId;
   page = transition.page;
   const composer = transition.composer;
   if (!composer) throw new Error(`${job.company} / ${job.title}：未找到沟通输入框`);
@@ -1355,28 +1450,50 @@ async function applyCurrentBossJob(runId, tabId, job) {
   await bridge.execute({ kind: "computerClick", tabId, x: composerPoint.x, y: composerPoint.y, reason: `已批准批次：聚焦 ${job.company} 的沟通输入框` });
   await bridge.execute({ kind: "computerType", tabId, value: job.greeting, replace: true, reason: `已批准批次：填写该 JD 的定制招呼语` });
   await sleep(500);
-  page = await bridge.execute({ kind: "inspect", tabId });
-  if (!page) {
-    page = await waitForBossPage(runId, (value) => value?.adapter === "boss-zhipin", "BOSS 沟通页面", 8, tabId);
-  }
+  let current = await waitForBossPageFollowingTabs(
+    runId,
+    (value) => value?.adapter === "boss-zhipin",
+    "BOSS 沟通页面",
+    8,
+    tabId,
+    ["chat"]
+  );
+  page = current.page;
+  tabId = current.tabId;
   let send = findPageControl(page, /^(?:发送|发送消息|确定发送)$/i);
   if (!send) {
-    page = await waitForBossPage(
+    current = await waitForBossPageFollowingTabs(
       runId,
       (value) => Boolean(findPageControl(value, /^(?:发送|发送消息|确定发送)$/i)),
       "可用的消息发送按钮",
       8,
-      tabId
+      tabId,
+      ["chat"]
     );
+    page = current.page;
+    tabId = current.tabId;
     send = findPageControl(page, /^(?:发送|发送消息|确定发送)$/i);
   }
   if (!send) throw new Error(`${job.company} / ${job.title}：未找到唯一的发送按钮，未自动发送`);
   const sendPoint = centerOf(send, "发送按钮");
   await bridge.execute({ kind: "computerMove", tabId, x: sendPoint.x, y: sendPoint.y, reason: `已批准批次：移动到 ${job.company} 的发送按钮` });
   await bridge.execute({ kind: "computerClick", tabId, x: sendPoint.x, y: sendPoint.y, reason: `已批准批次：发送 ${job.company} / ${job.title} 的定制招呼语` });
-  await waitForBossPage(runId, (value) => String(value.text || "").includes(job.greeting.slice(0, 24)), "消息发送结果", 8, tabId);
+  await waitForBossPageFollowingTabs(
+    runId,
+    (value) => String(value.text || "").includes(job.greeting.slice(0, 24)),
+    "消息发送结果",
+    10,
+    tabId,
+    ["chat"]
+  );
   recordBossJobSent(job);
   return restoreBossListAfterContact(runId, tabId, job);
+}
+
+function unverifiedBossApplicationError(job, error) {
+  const wrapped = new Error(`${job.company} / ${job.title}：投递链路未完整验证，已暂停而不是跳到下一个 JD。${error.message}`);
+  wrapped.code = "BOSS_APPLY_NOT_VERIFIED";
+  return wrapped;
 }
 
 function stopAutopilotWith(error, fallbackPhase = "autopilot-blocked") {
@@ -1560,6 +1677,7 @@ async function runAutomaticJobSearch(runId, targetApplications) {
             continue;
           }
           seenUrls.add(candidate.url);
+          let applicationAttempted = false;
           try {
             setAutopilot({ currentJobId: candidate.id, message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在查看 ${candidate.company} / ${candidate.title}` });
             const detailPage = await selectBossJobCard(runId, tabId, candidate);
@@ -1574,13 +1692,19 @@ async function runAutomaticJobSearch(runId, targetApplications) {
                 message: `${job.company} / ${job.title}：${analysis.matches ? "技术与岗位匹配，准备沟通" : `存在明确硬性冲突，跳过：${analysis.summary || analysis.hardGaps?.join("、") || "岗位方向不符"}`}`
               });
               if (analysis.matches === true && job.greeting) {
+                applicationAttempted = true;
                 const selected = store.state.workflow.autopilot.selected + 1;
                 setAutopilot({ selected, status: "running-apply", stage: "applying", message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在沟通 ${job.company} / ${job.title}` });
-                page = await applyCurrentBossJob(runId, tabId, job);
+                const application = await applyCurrentBossJob(runId, tabId, job);
+                page = application.page;
+                tabId = application.tabId;
                 setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已完成 ${store.state.workflow.autopilot.sent}/${targetApplications}，继续寻找匹配岗位` });
               }
             }
           } catch (error) {
+            if (applicationAttempted && error?.code !== "BOSS_APPLY_NOT_VERIFIED") {
+              throw unverifiedBossApplicationError(candidate, error);
+            }
             if (fatalAutopilotError(error)) throw error;
             store.addActivity(`自动找工作当前岗位未完成：${candidate.company} / ${candidate.title}（${error.message}）`, "error");
             try {
