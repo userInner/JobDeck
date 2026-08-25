@@ -1172,8 +1172,12 @@ function bossJobDetailMatches(page, candidate, beforeFingerprint = "") {
   const selectedCardMatches = (page?.boss?.jobCards || []).some((entry) => entry.selected
     && Boolean(bossJobCard({ boss: { jobCards: [entry] } }, candidate)));
   const detailUrlMatches = /job_detail/i.test(job.url || "") && sameJobUrl(job.url, candidate.url);
-  const changed = !beforeFingerprint || bossJobDetailFingerprint(page) !== beforeFingerprint;
-  return detailUrlMatches || selectedCardMatches || (titleMatches && companyMatches && changed);
+  // The first card in a BOSS result list is frequently already selected. In
+  // that case clicking it again leaves the detail fingerprint unchanged even
+  // though the visible JD is exactly the requested one. Title + company are
+  // therefore sufficient independent evidence; requiring a DOM change made
+  // the runner time out and move on before it ever reached “立即沟通”.
+  return detailUrlMatches || selectedCardMatches || (titleMatches && companyMatches);
 }
 
 function fatalAutopilotError(error) {
@@ -1264,6 +1268,7 @@ async function adaptiveBossComposer(runId, tabId, job) {
   const attempts = new Map();
   const trace = [];
   let platformGreetingObserved = false;
+  let contactRetries = 0;
   for (let turn = 1; turn <= 12; turn += 1) {
     if (!autopilotActive(runId)) throw new Error("托管投递已停止");
     const page = await bridge.execute({ kind: "inspect", tabId });
@@ -1284,9 +1289,22 @@ async function adaptiveBossComposer(runId, tabId, job) {
     let source = "页面状态规则";
     if (next && (attempts.get(next.selector) || 0) >= 2) next = undefined;
 
+    // A visible click can occasionally be swallowed while the BOSS detail
+    // panel is still settling. Retry the same job in place instead of treating
+    // “JD opened” as completion and advancing to another card. We only retry
+    // while the original action is still present and BOSS has not reported
+    // that its default greeting was sent, which avoids duplicate contacts.
+    if (!next && !platformGreetingSent && contactRetries < 2) {
+      next = findPageControl(page, /^(?:立即沟通|立即申请|投递简历|申请职位)$/i);
+      if (next) {
+        contactRetries += 1;
+        source = `沟通入口未生效，原岗位重试 ${contactRetries}/2`;
+      }
+    }
+
     if (!next && turn >= 3) {
       const plan = await ai.planBrowserTask(
-        `已经点击“立即沟通”，目标是进入与 ${job.title} 招聘方的沟通输入页并发送既有定制招呼。请只从真实可见控件中选择一个用于继续、进入聊天、关闭中间层或返回的安全点击；不要再次点击立即沟通，不要填写或发送任何内容。`,
+        `已经点击“立即沟通”，目标是进入与 ${job.title} 招聘方的沟通输入页并发送既有定制招呼。请只从真实可见控件中选择一个用于继续、进入聊天、关闭中间层或返回的安全点击；不要填写或发送任何内容。`,
         page
       );
       const planned = plan.actions.find((action) => action.kind === "click");
@@ -1505,6 +1523,7 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
     let discoveredCount = 0;
     let addedCount = 0;
     const seenUrls = new Set();
+    const discoveredUrls = new Set();
     let plansWithoutProgress = 0;
     let planIndex = 0;
 
@@ -1525,36 +1544,52 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
         const activeLocation = result.effectiveLocation;
         let page = result.page;
         while (page && store.state.workflow.autopilot.sent < targetApplications) {
-          const fresh = jobCandidatesFromPage(page).filter((candidate) => {
+          // BOSS virtualizes and refreshes the result column whenever a detail
+          // is opened or a chat is closed. Process exactly one card from the
+          // latest snapshot, then observe the page again. Iterating a captured
+          // array of cards caused the runner to click a valid first JD and then
+          // silently skip the remaining stale entries.
+          const visible = jobCandidatesFromPage(page);
+          const fresh = visible.filter((candidate) => {
             if (!candidate.url || seenUrls.has(candidate.url)) return false;
-            seenUrls.add(candidate.url);
             if (!candidateMatchesExpectedLocation(candidate, activeLocation)) return false;
             const existing = store.state.jobs.find((job) => sameJobUrl(job.url, candidate.url));
             return !["sent", "replied", "interview"].includes(existing?.status);
           });
           const persisted = persistSearchCandidates(fresh);
           addedCount += persisted.addedCount;
-          discoveredCount += fresh.length;
+          for (const candidate of fresh) {
+            if (!discoveredUrls.has(candidate.url)) {
+              discoveredUrls.add(candidate.url);
+              discoveredCount += 1;
+            }
+          }
           setAutopilot({ discovered: discoveredCount, status: "running-analysis", stage: "analyzing" });
 
-          for (const candidateId of persisted.candidateIds) {
-            if (!autopilotActive(runId)) throw new Error("托管投递已停止");
-            if (store.state.workflow.autopilot.sent >= targetApplications) break;
-            const candidate = store.state.jobs.find((job) => job.id === candidateId);
-            if (!candidate) continue;
-            try {
-              setAutopilot({ currentJobId: candidate.id, message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在查看 ${candidate.company} / ${candidate.title}` });
-              const detailPage = await selectBossJobCard(runId, tabId, candidate);
-              const job = upsertDetailedJob(detailPage, candidate.id, candidate.url);
-              if (!candidateMatchesExpectedLocation(job, activeLocation)) {
-                store.addActivity(`自动找工作跳过异地岗位：${job.company} / ${job.title}（${job.location || "地点未识别"}，当前期望 ${activeLocation}）`, "done");
-                continue;
-              }
+          const candidateId = persisted.candidateIds[0];
+          if (!candidateId) {
+            page = await advanceBossJobResults(runId, tabId, seenUrls);
+            continue;
+          }
+          if (!autopilotActive(runId)) throw new Error("托管投递已停止");
+          const candidate = store.state.jobs.find((job) => job.id === candidateId);
+          if (!candidate) {
+            page = await advanceBossJobResults(runId, tabId, seenUrls);
+            continue;
+          }
+          seenUrls.add(candidate.url);
+          try {
+            setAutopilot({ currentJobId: candidate.id, message: `目标 ${store.state.workflow.autopilot.sent}/${targetApplications}；正在查看 ${candidate.company} / ${candidate.title}` });
+            const detailPage = await selectBossJobCard(runId, tabId, candidate);
+            const job = upsertDetailedJob(detailPage, candidate.id, candidate.url);
+            if (!candidateMatchesExpectedLocation(job, activeLocation)) {
+              store.addActivity(`自动找工作跳过异地岗位：${job.company} / ${job.title}（${job.location || "地点未识别"}，当前期望 ${activeLocation}）`, "done");
+            } else {
               const analysis = await analyzeForAutopilot(job, { matchOnly: true });
               inspectedCount += 1;
               setAutopilot({
                 analyzed: inspectedCount,
-                message: `${job.company} / ${job.title}：${analysis.matches ? "技术与岗位匹配，准备沟通" : "方向或技术栈不匹配，继续下一个"}`
+                message: `${job.company} / ${job.title}：${analysis.matches ? "技术与岗位匹配，准备沟通" : `存在明确硬性冲突，跳过：${analysis.summary || analysis.hardGaps?.join("、") || "岗位方向不符"}`}`
               });
               if (analysis.matches === true && job.greeting) {
                 const selected = store.state.workflow.autopilot.selected + 1;
@@ -1562,23 +1597,24 @@ async function runAutomaticJobSearch(runId, plans, targetApplications) {
                 page = await applyCurrentBossJob(runId, tabId, job);
                 setAutopilot({ status: "running-analysis", stage: "analyzing", message: `已完成 ${store.state.workflow.autopilot.sent}/${targetApplications}，继续寻找匹配岗位` });
               }
-            } catch (error) {
-              if (fatalAutopilotError(error)) throw error;
-              store.addActivity(`自动找工作跳过异常岗位：${candidate.company} / ${candidate.title}（${error.message}）`, "error");
-              try {
-                const recovered = await recoverBossListAfterCandidateError(runId, tabId, plan, candidate);
-                tabId = recovered.tabId;
-                page = recovered.page;
-              } catch (recoveryError) {
-                if (fatalAutopilotError(recoveryError)) throw recoveryError;
-                store.addActivity(`恢复职位列表失败，改试下一组求职期望：${recoveryError.message}`, "error");
-                page = null;
-                break;
-              }
             }
-            await sleep(900);
+          } catch (error) {
+            if (fatalAutopilotError(error)) throw error;
+            store.addActivity(`自动找工作当前岗位未完成：${candidate.company} / ${candidate.title}（${error.message}）`, "error");
+            try {
+              const recovered = await recoverBossListAfterCandidateError(runId, tabId, plan, candidate);
+              tabId = recovered.tabId;
+              page = recovered.page;
+            } catch (recoveryError) {
+              if (fatalAutopilotError(recoveryError)) throw recoveryError;
+              store.addActivity(`恢复职位列表失败，改试下一组求职期望：${recoveryError.message}`, "error");
+              page = null;
+            }
           }
-          page = await advanceBossJobResults(runId, tabId, seenUrls);
+          await sleep(900);
+          if (page?.pageType !== "job-list") {
+            page = await bridge.execute({ kind: "inspect", tabId }).catch(() => page);
+          }
         }
       } catch (error) {
         if (fatalAutopilotError(error)) throw error;

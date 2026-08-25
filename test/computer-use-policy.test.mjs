@@ -54,6 +54,8 @@ test("job detail selection retries and verifies multiple independent signals", (
   assert.match(selection, /attempt === 0 \|\| attempt === 6 \|\| attempt === 12/);
   assert.match(selection, /bossJobDetailMatches/);
   assert.match(selection, /detailUrlMatches \|\| selectedCardMatches/);
+  assert.match(selection, /titleMatches && companyMatches/);
+  assert.doesNotMatch(selection, /titleMatches && companyMatches && changed/);
 });
 
 test("compact BOSS inspection keeps the visible contact action", () => {
@@ -87,9 +89,20 @@ test("automatic BOSS workflow re-observes and replans intermediate pages", () =>
   assert.match(source, /kind:\s*"computerMove"/);
   assert.match(source, /kind:\s*"computerClick"/);
   assert.match(source, /平台只发送了默认招呼，尚未找到会话输入框；定制消息未发送且不会计入成功/);
+  assert.match(source, /沟通入口未生效，原岗位重试/);
+  assert.match(source, /contactRetries < 2/);
   assert.doesNotMatch(source, /recordBossJobSent\(job, "platform-default"\)/);
   assert.doesNotMatch(source, /未重复发送定制消息/);
   assert.doesNotMatch(source.slice(source.indexOf("async function adaptiveBossComposer"), source.indexOf("function recordBossJobSent")), /bridge\.execute\(\{ kind: "click"/);
+});
+
+test("automatic job search processes one card from each fresh page snapshot", () => {
+  const start = source.indexOf("async function runAutomaticJobSearch");
+  const end = source.indexOf("async function startAutopilotFromCurrentList", start);
+  const workflow = source.slice(start, end);
+  assert.match(workflow, /const candidateId = persisted\.candidateIds\[0\]/);
+  assert.match(workflow, /seenUrls\.add\(candidate\.url\)/);
+  assert.doesNotMatch(workflow, /for \(const candidateId of persisted\.candidateIds\)/);
 });
 
 test("automatic job search is progress-driven until the requested verified-contact target", () => {
