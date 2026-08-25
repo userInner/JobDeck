@@ -841,7 +841,7 @@ async function streamChat(payload, onDelta, onAction = () => {}, retried = false
 
 function renderMessages() {
   $("#messages").innerHTML = chatMessages.map((message, index) => `
-    <article class="message ${message.role} ${message.streaming ? "streaming" : ""}" data-message-index="${index}"><span>${message.role === "assistant" ? "AI" : "我"}</span><div class="message-body"><p>${escapeHtml(message.content || (message.streaming ? "正在连接模型…" : ""))}</p>${chatActionMarkup(message, index)}</div></article>`).join("");
+    <article class="message ${message.role} ${message.streaming ? "streaming" : ""}" data-message-index="${index}"><span>${message.role === "assistant" ? "AI" : "我"}</span><div class="message-body"><p>${escapeHtml(message.content || (message.streaming ? "AI 正在思考中…" : ""))}</p>${chatActionMarkup(message, index)}</div></article>`).join("");
   $("#messages").scrollTop = $("#messages").scrollHeight;
 }
 
@@ -925,7 +925,7 @@ function refreshChatActionCards() {
 function updateStreamingMessage(index) {
   const message = chatMessages[index];
   const paragraph = $(`[data-message-index="${index}"] p`);
-  if (paragraph) paragraph.textContent = message?.content || "正在连接模型…";
+  if (paragraph) paragraph.textContent = message?.content || "AI 正在思考中…";
   $("#messages").scrollTop = $("#messages").scrollHeight;
 }
 

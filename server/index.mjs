@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { isJobSearchExecutionIntent, requestedApplicationTarget } from "./agent-intent.mjs";
 import { GoalAgentRuntime } from "./agent-runtime.mjs";
 import { AIService } from "./ai.mjs";
 import { findPageControl, rankAnalyzedJobs, verificationReason } from "./autopilot.mjs";
@@ -2053,7 +2054,7 @@ async function beginAutomaticResumeRewrite() {
 function agentAuthorizationScopes(text) {
   const value = String(text || "");
   const scopes = [];
-  if (/(?:找.{0,10}(?:工作|岗位|职位)|投递|海投|申请岗位|沟通(?:岗位|职位))/.test(value)) scopes.push("jobs:apply");
+  if (isJobSearchExecutionIntent(value) || /(?:投递|海投|申请岗位|沟通(?:岗位|职位))/.test(value)) scopes.push("jobs:apply");
   if (/(?:修改|优化|改写|更新).{0,10}(?:在线)?简历/.test(value)) scopes.push("resume:write");
   if (/(?:发送|回复).{0,10}(?:招聘|HR|BOSS|消息)/i.test(value)) scopes.push("reply:send");
   return scopes;
@@ -2129,11 +2130,13 @@ const agentTools = [
     description: "读取 BOSS 已保存求职期望、循环浏览完整 JD、技术匹配即发送逐岗位定制招呼语",
     input: { targetApplications: "希望完成的已验证沟通数量，1到500；未指定时默认60" },
     risk: "jobs:apply",
-    execute: async (arguments_) => {
+    execute: async (arguments_, task) => {
       if (String(store.state.workflow.autopilot?.status || "").startsWith("running-")) {
         return { progress: false, waitFor: "job-search", summary: jobSearchProgressContent() };
       }
-      const result = startAutomaticJobSearch(arguments_.targetApplications);
+      const requestedTarget = requestedApplicationTarget(task?.sourceText || task?.goal);
+      const targetApplications = requestedTarget || DEFAULT_AUTO_APPLY_TARGET;
+      const result = startAutomaticJobSearch(targetApplications);
       return { progress: true, waitFor: "job-search", summary: `已启动目标为 ${result.targetApplications} 个已验证沟通的搜索与投递`, data: result };
     }
   },
@@ -2249,12 +2252,30 @@ async function agentBackgroundStatus(waitFor) {
   return { done: true, success: false, progress: false, summary: `未知后台任务：${waitFor}` };
 }
 
+async function verifyAgentFinish({ task, observation }) {
+  if (!isJobSearchExecutionIntent(task?.sourceText || task?.goal)) return { done: true };
+  const startedSearch = (task?.steps || []).some((step) => step.tool === "search_and_apply_jobs");
+  const jobSearch = observation?.jobSearch || {};
+  const target = requestedApplicationTarget(task?.sourceText || task?.goal)
+    || Number(jobSearch.target)
+    || DEFAULT_AUTO_APPLY_TARGET;
+  const sent = Number(jobSearch.sent) || 0;
+  if (startedSearch && jobSearch.status === "complete" && sent >= target) return { done: true };
+  return {
+    done: false,
+    message: startedSearch
+      ? `求职目标尚未完成：已验证沟通 ${sent}/${target}，Agent 将继续观察并规划下一步`
+      : "尚未启动真实岗位搜索与投递，不能只输出计划后结束"
+  };
+}
+
 tenantRuntime.setAgentFactory((tenant) => new GoalAgentRuntime({
   store: tenant.store,
   ai: new AIService(tenant.store),
   tools: agentTools,
   observe: observeAgentState,
   waitStatus: agentBackgroundStatus,
+  verifyFinish: verifyAgentFinish,
   runInContext: (callback) => tenantRuntime.run(tenant, callback)
 }));
 
@@ -2262,8 +2283,9 @@ async function routeToAgent(messages) {
   const agentRuntime = tenantRuntime.agentRuntime();
   const sourceText = messages.at(-1)?.content || "";
   const route = await ai.routeAgentRequest(sourceText, agentRuntime.catalog(), store.state.workflow.agent);
-  if (route.kind !== "agent") return null;
-  const task = agentRuntime.start({ goal: route.goal || sourceText, sourceText, scopes: agentAuthorizationScopes(sourceText) });
+  const executableGoal = isJobSearchExecutionIntent(sourceText);
+  if (route.kind !== "agent" && !executableGoal) return null;
+  const task = agentRuntime.start({ goal: route.kind === "agent" ? (route.goal || sourceText) : sourceText, sourceText, scopes: agentAuthorizationScopes(sourceText) });
   return {
     content: `已把目标交给求职 Agent：${task.goal}\n它会持续观察状态、动态规划下一步并从工具底座选择动作；只按可验证进度结束。涉及未授权的外部发送、简历写入或敏感决定时会暂停向你确认。`,
     action: { kind: "agent", runId: task.runId }

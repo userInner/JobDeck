@@ -91,3 +91,27 @@ test("goal agent resumes planning after a background tool reaches a terminal sta
   assert.equal(store.state.workflow.agent.message, "后台结果已验证");
   runtime.close();
 });
+
+test("goal agent rejects an unverified finish and keeps planning", async () => {
+  const store = fakeStore();
+  let decisions = 0;
+  const runtime = new GoalAgentRuntime({
+    store,
+    ai: { async planAgentStep() {
+      decisions += 1;
+      return decisions === 1
+        ? { type: "finish", plan: ["投递"], message: "我认为完成了" }
+        : { type: "tool", tool: "work", arguments: {}, plan: ["继续投递"], message: "继续执行" };
+    } },
+    tools: [{ name: "work", description: "执行投递", input: {}, risk: "read", async execute() { return { progress: true, waitFor: "work", summary: "运行中" }; } }],
+    observe: async () => ({}),
+    waitStatus: async () => ({ done: false, summary: "运行中" }),
+    verifyFinish: async () => ({ done: false, message: "目标还没完成" })
+  });
+  runtime.start({ goal: "完成岗位投递", sourceText: "完成岗位投递", scopes: [] });
+  await waitUntil(() => store.state.workflow.agent.status === "waiting");
+  assert.equal(decisions, 2);
+  assert.equal(store.state.workflow.agent.steps[0].kind, "finish-rejected");
+  assert.match(store.state.workflow.agent.message, /运行中/);
+  runtime.close();
+});

@@ -16,12 +16,13 @@ function compactToolData(value) {
 }
 
 export class GoalAgentRuntime {
-  constructor({ store, ai, tools, observe, waitStatus, runInContext = (callback) => callback() }) {
+  constructor({ store, ai, tools, observe, waitStatus, verifyFinish = null, runInContext = (callback) => callback() }) {
     this.store = store;
     this.ai = ai;
     this.tools = new Map(tools.map((tool) => [tool.name, tool]));
     this.observe = observe;
     this.waitStatus = waitStatus;
+    this.verifyFinish = verifyFinish;
     this.runInContext = runInContext;
     this.running = new Set();
     this.timer = setInterval(() => this.runInContext(() => this.tickWaiting()), 3000);
@@ -113,6 +114,20 @@ export class GoalAgentRuntime {
         if (Array.isArray(decision.plan) && decision.plan.length) this.update({ plan: decision.plan });
 
         if (decision.type === "finish") {
+          const verification = this.verifyFinish
+            ? await this.verifyFinish({ task: this.current(), observation, decision })
+            : { done: true };
+          if (verification?.done === false) {
+            const noProgressCount = (this.current().noProgressCount || 0) + 1;
+            const message = verification.message || "目标尚未取得足够的可验证进展，正在继续规划…";
+            this.appendStep({ kind: "finish-rejected", label: message, status: "error" });
+            if (noProgressCount >= 5) {
+              this.update({ status: "needs-attention", noProgressCount, currentTool: null, waitFor: null, message });
+              return;
+            }
+            this.update({ status: "planning", noProgressCount, currentTool: null, waitFor: null, message });
+            continue;
+          }
           this.appendStep({ kind: "finish", label: decision.message || "目标已完成", status: "done" });
           this.update({ status: "complete", message: decision.message || "目标已完成", completedAt: new Date().toISOString(), currentTool: null, waitFor: null });
           this.store.addActivity(`求职 Agent 完成：${decision.message || this.current().goal}`);
