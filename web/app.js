@@ -473,6 +473,13 @@ function setValueUnlessFocused(selector, value) {
   if (element && document.activeElement !== element) element.value = value;
 }
 
+function parseListInput(value) {
+  return [...new Set(String(value || "")
+    .split(/[\n,，、;；]+/)
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
 function formatTime(value) {
   return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
@@ -967,8 +974,8 @@ $("#targetForm").addEventListener("submit", async (event) => {
   setBusy(button, true, "保存中…");
   try {
     await api("/api/candidate", { method: "PATCH", body: JSON.stringify({
-      targetRoles: $("#settingsRoles").value.split("\n").map((item) => item.trim()).filter(Boolean),
-      locations: $("#settingsLocations").value.split("\n").map((item) => item.trim()).filter(Boolean),
+      targetRoles: parseListInput($("#settingsRoles").value),
+      locations: parseListInput($("#settingsLocations").value),
       salaryFloorK: Number($("#salaryFloor").value), salaryUpperTargetK: Number($("#salaryUpper").value)
     }) });
     toast("求职目标已保存");
