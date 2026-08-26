@@ -20,8 +20,8 @@ test("masthead exposes a compact companion extension download", () => {
   const css = fs.readFileSync(new URL("../web/styles.css", import.meta.url), "utf8");
   assert.match(html, /class="companion-download"/);
   assert.match(html, />安装配套插件<\/a>/);
-  assert.match(html, /href="\/downloads\/JobDeck-Chrome-Extension-v0\.17\.0\.zip"/);
-  assert.match(html, /download="JobDeck-Chrome-Extension-v0\.17\.0\.zip"/);
+  assert.match(html, /href="\/downloads\/JobDeck-Chrome-Extension-v0\.17\.1\.zip"/);
+  assert.match(html, /download="JobDeck-Chrome-Extension-v0\.17\.1\.zip"/);
   assert.match(css, /\.companion-download\s*\{/);
 });
 

@@ -1,8 +1,13 @@
 importScripts("boss-adapter.js");
 
+const REMOTE_API_URL = "https://job.aibro.vip";
+const REMOTE_BRIDGE_URL = "wss://job.aibro.vip/extension";
+const LEGACY_LOCAL_API_URL = "http://127.0.0.1:43120";
+const LEGACY_LOCAL_BRIDGE_URL = "ws://127.0.0.1:43120/extension";
+const CONNECTION_DEFAULTS_VERSION = 2;
 const DEFAULTS = {
-  apiUrl: "http://127.0.0.1:43120",
-  bridgeUrl: "ws://127.0.0.1:43120/extension",
+  apiUrl: REMOTE_API_URL,
+  bridgeUrl: REMOTE_BRIDGE_URL,
   token: "",
   allowedOrigins: []
 };
@@ -16,6 +21,23 @@ const ACTION_RECEIPT_LIMIT = 120;
 
 async function settings() {
   return { ...DEFAULTS, ...(await chrome.storage.local.get(DEFAULTS)) };
+}
+
+async function migrateLegacyConnectionDefaults() {
+  const stored = await chrome.storage.local.get([
+    "apiUrl", "bridgeUrl", "connectionDefaultsVersion"
+  ]);
+  if (Number(stored.connectionDefaultsVersion || 0) >= CONNECTION_DEFAULTS_VERSION) return;
+
+  const untouchedLocalDefaults = (!stored.apiUrl || stored.apiUrl === LEGACY_LOCAL_API_URL)
+    && (!stored.bridgeUrl || stored.bridgeUrl === LEGACY_LOCAL_BRIDGE_URL);
+  await chrome.storage.local.set(untouchedLocalDefaults
+    ? {
+        apiUrl: REMOTE_API_URL,
+        bridgeUrl: REMOTE_BRIDGE_URL,
+        connectionDefaultsVersion: CONNECTION_DEFAULTS_VERSION
+      }
+    : { connectionDefaultsVersion: CONNECTION_DEFAULTS_VERSION });
 }
 
 async function connect() {
@@ -33,7 +55,7 @@ async function connect() {
     previousSocket?.close();
     nextSocket.onopen = () => {
       if (socket !== nextSocket) return;
-      updateState(true, "已连接 JobDeck 本地服务");
+      updateState(true, "已连接 JobDeck 工作台");
       heartbeatTimer = setInterval(() => {
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping", at: Date.now() }));
       }, 20_000);
@@ -52,7 +74,7 @@ async function connect() {
       }
     };
     nextSocket.onerror = () => {
-      if (socket === nextSocket) updateState(false, "无法连接 JobDeck 本地服务");
+      if (socket === nextSocket) updateState(false, "无法连接 JobDeck 工作台");
     };
     nextSocket.onclose = () => {
       if (socket !== nextSocket) return;
@@ -601,11 +623,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.token || changes.bridgeUrl) connect();
 });
-chrome.runtime.onInstalled.addListener(() => connect());
-chrome.runtime.onStartup.addListener(() => connect());
+chrome.runtime.onInstalled.addListener(() => migrateLegacyConnectionDefaults().then(connect));
+chrome.runtime.onStartup.addListener(() => migrateLegacyConnectionDefaults().then(connect));
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.alarms.create("jobdeck-heartbeat", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => {
   if (!socket || socket.readyState > WebSocket.OPEN) connect();
 });
-connect();
+migrateLegacyConnectionDefaults().then(connect);

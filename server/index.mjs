@@ -2845,7 +2845,7 @@ tenantRuntime.setTenantInitializer(() => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.17.0", remoteMode, multiUser: multiUserMode }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.17.1", remoteMode, multiUser: multiUserMode }));
 app.get("/api/state", (_req, res) => res.json(statePayload()));
 
 app.post("/api/provider", (req, res) => {

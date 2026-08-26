@@ -3,13 +3,16 @@ const bridgeUrl = document.querySelector("#bridgeUrl");
 const token = document.querySelector("#token");
 const message = document.querySelector("#message");
 const openWorkspace = document.querySelector("#openWorkspace");
+const DEFAULT_API_URL = "https://job.aibro.vip";
+const DEFAULT_BRIDGE_URL = "wss://job.aibro.vip/extension";
+const CONNECTION_DEFAULTS_VERSION = 2;
 
 function updateWorkspaceLink() {
   try { openWorkspace.href = new URL(apiUrl.value.trim()).href; }
-  catch { openWorkspace.href = "http://127.0.0.1:43120"; }
+  catch { openWorkspace.href = DEFAULT_API_URL; }
 }
 
-chrome.storage.local.get({ apiUrl: "http://127.0.0.1:43120", bridgeUrl: "ws://127.0.0.1:43120/extension", token: "" }).then((values) => {
+chrome.storage.local.get({ apiUrl: DEFAULT_API_URL, bridgeUrl: DEFAULT_BRIDGE_URL, token: "" }).then((values) => {
   apiUrl.value = values.apiUrl;
   bridgeUrl.value = values.bridgeUrl;
   token.value = values.token;
@@ -34,7 +37,12 @@ document.querySelector("#form").addEventListener("submit", async (event) => {
     if (!/^[A-Za-z0-9._~-]+$/.test(accessToken)) throw new Error("令牌只能包含字母、数字和 . _ ~ -");
     const granted = await chrome.permissions.request({ origins: [`${api.origin}/*`] });
     if (!granted) throw new Error("需要允许扩展访问这个 JobDeck 工作台");
-    await chrome.storage.local.set({ apiUrl: api.href.replace(/\/$/, ""), bridgeUrl: bridge.href, token: accessToken });
+    await chrome.storage.local.set({
+      apiUrl: api.href.replace(/\/$/, ""),
+      bridgeUrl: bridge.href,
+      token: accessToken,
+      connectionDefaultsVersion: CONNECTION_DEFAULTS_VERSION
+    });
     await chrome.runtime.sendMessage({ type: "reconnect" });
     updateWorkspaceLink();
     message.textContent = "已保存，扩展正在连接你的 JobDeck 账号空间。";

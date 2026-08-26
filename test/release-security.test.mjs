@@ -25,6 +25,26 @@ test("companion extension is limited to JobDeck and BOSS Zhipin origins", () => 
   assert.match(sidepanel, /candidate\.hostname\.endsWith\("\.zhipin\.com"\)/);
 });
 
+test("production extension defaults to the deployed HTTPS workspace and migrates untouched local defaults", () => {
+  const options = read("../extension/options.js");
+  const optionsHtml = read("../extension/options.html");
+  const serviceWorker = read("../extension/service-worker.js");
+  const sidepanel = read("../extension/sidepanel.js");
+
+  assert.match(options, /DEFAULT_API_URL = "https:\/\/job\.aibro\.vip"/);
+  assert.match(options, /DEFAULT_BRIDGE_URL = "wss:\/\/job\.aibro\.vip\/extension"/);
+  assert.match(options, /connectionDefaultsVersion: CONNECTION_DEFAULTS_VERSION/);
+  assert.match(optionsHtml, /value="https:\/\/job\.aibro\.vip"/);
+  assert.match(optionsHtml, /value="wss:\/\/job\.aibro\.vip\/extension"/);
+  assert.match(serviceWorker, /apiUrl: REMOTE_API_URL/);
+  assert.match(serviceWorker, /bridgeUrl: REMOTE_BRIDGE_URL/);
+  assert.match(serviceWorker, /untouchedLocalDefaults/);
+  assert.match(serviceWorker, /migrateLegacyConnectionDefaults\(\)\.then\(connect\)/);
+  assert.match(sidepanel, /^let apiBase = "https:\/\/job\.aibro\.vip";/);
+  assert.match(sidepanel, /chrome\.storage\.onChanged\.addListener/);
+  assert.match(sidepanel, /apiBase = changes\.apiUrl\.newValue/);
+});
+
 test("production reverse proxy sends baseline browser security headers", () => {
   const caddyfile = read("../deploy/Caddyfile");
 

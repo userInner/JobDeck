@@ -1,4 +1,4 @@
-let apiBase = "http://127.0.0.1:43120";
+let apiBase = "https://job.aibro.vip";
 const $ = (selector) => document.querySelector(selector);
 const elements = {
   setup: $("#setup"), workspace: $("#workspace"), connection: $("#connection"),
@@ -229,6 +229,13 @@ elements.queue.addEventListener("click", async (event) => {
 
 chrome.tabs.onActivated.addListener(loadTab);
 chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => { if (changeInfo.url) loadTab(); });
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local" || (!changes.apiUrl && !changes.token)) return;
+  if (changes.apiUrl) apiBase = changes.apiUrl.newValue || "https://job.aibro.vip";
+  if (changes.token) token = changes.token.newValue || "";
+  loadTab();
+  refresh();
+});
 chrome.storage.local.get({ token: "", apiUrl: apiBase }).then((values) => {
   token = values.token;
   apiBase = values.apiUrl;
