@@ -16,8 +16,10 @@ let socket;
 let reconnectTimer;
 let heartbeatTimer;
 let currentState = { connected: false, lastError: "本地服务尚未连接" };
+let bossAutoReplyPollInFlight = false;
 const ACTION_RECEIPTS_KEY = "jobdeckActionReceipts";
 const ACTION_RECEIPT_LIMIT = 120;
+const BOSS_AUTO_REPLY_ALARM = "jobdeck-boss-auto-reply";
 
 async function settings() {
   return { ...DEFAULTS, ...(await chrome.storage.local.get(DEFAULTS)) };
@@ -146,6 +148,120 @@ async function ensureAllowed(tab) {
   const origin = originOf(tab.url || "");
   if (!(await hasSiteAccess(origin))) {
     throw new Error(`当前站点尚未授权：${origin || tab.url || "未知页面"}。请在扩展侧边栏允许此站点。`);
+  }
+}
+
+function isBossChatUrl(value) {
+  try {
+    const url = new URL(value || "");
+    return url.protocol === "https:"
+      && /(^|\.)zhipin\.com$/i.test(url.hostname)
+      && /^\/web\/geek\/chat(?:\/|$)/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function normalizedBossReplyTargetText(value, limit = 4000) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+}
+
+function bossReplyTargetMessageRecords(chat = {}) {
+  return (Array.isArray(chat.messages) ? chat.messages : [])
+    .map((message, index) => ({
+      index,
+      from: normalizedBossReplyTargetText(message?.from, 40).toLowerCase(),
+      text: normalizedBossReplyTargetText(message?.text),
+      id: normalizedBossReplyTargetText(message?.id, 500),
+      idSource: normalizedBossReplyTargetText(message?.idSource, 80).toLowerCase()
+    }))
+    .filter((message) => message.from || message.text || message.id);
+}
+
+function bossReplyTargetFingerprint(chat = {}, recordIndex = null) {
+  const conversationId = normalizedBossReplyTargetText(chat.conversationId, 1000);
+  const records = bossReplyTargetMessageRecords(chat);
+  const selectedIndex = Number.isInteger(recordIndex) ? recordIndex : records.length - 1;
+  const message = records[selectedIndex];
+  if (!conversationId || !message) return "";
+  const durableId = message.id && !["synthetic", "fallback", "index"].includes(message.idSource);
+  const occurrence = records.slice(0, selectedIndex + 1)
+    .filter((candidate) => candidate.from === message.from && candidate.text === message.text)
+    .length;
+  return JSON.stringify({
+    conversationId,
+    from: message.from,
+    identity: durableId
+      ? { id: message.id, idSource: message.idSource || "attribute" }
+      : { text: message.text, occurrence }
+  });
+}
+
+function bossReplyRequestTarget(page, tabId) {
+  const chat = page?.boss?.chat || {};
+  const target = {
+    tabId: Number(tabId),
+    conversationId: normalizedBossReplyTargetText(chat.conversationId, 1000),
+    fingerprint: bossReplyTargetFingerprint(chat)
+  };
+  return Number.isInteger(target.tabId) && target.tabId > 0 && target.conversationId && target.fingerprint
+    ? target
+    : null;
+}
+
+async function recordBossAutoReplyPoll(status, message = "") {
+  await chrome.storage.local.set({
+    bossAutoReplyPoll: { status, message: String(message || ""), at: Date.now() }
+  });
+}
+
+async function pollBossAutoReply() {
+  if (bossAutoReplyPollInFlight || socket?.readyState !== WebSocket.OPEN || !currentState.connected) return;
+  const config = await settings();
+  if (!config.token) return;
+  const tabs = (await chrome.tabs.query({})).filter((tab) => tab?.id && isBossChatUrl(tab.url));
+  if (!tabs.length) return;
+  const authorized = [];
+  for (const tab of tabs) {
+    if (await hasSiteAccess(originOf(tab.url))) authorized.push(tab);
+  }
+  if (!authorized.length) return;
+
+  bossAutoReplyPollInFlight = true;
+  try {
+    const tab = authorized.find((candidate) => candidate.active) || authorized[0];
+    // Do not ask the server to write while the user already has a message in
+    // the composer.  The server enforces the same guard, but keeping it here
+    // avoids even starting an automatic reply round in that situation.
+    const page = await inspectBossTab(tab.id, false);
+    const composerValue = String(page?.boss?.chat?.composer?.valuePreview || "").trim();
+    if (composerValue) {
+      await recordBossAutoReplyPoll("blocked", "输入框已有内容，未自动回复");
+      return;
+    }
+    const target = bossReplyRequestTarget(page, tab.id);
+    if (!target) {
+      await recordBossAutoReplyPoll("blocked", "当前招聘对话缺少稳定身份，未启动自动回复");
+      return;
+    }
+    const response = await fetch(`${config.apiUrl}/api/boss/draft-reply`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-JobDeck-Token": config.token
+      },
+      body: JSON.stringify({ source: "extension-poll", ...target })
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `自动回复请求失败（${response.status}）`);
+    await recordBossAutoReplyPoll(body.status || "checked", body.message || body.reply?.reason || "");
+  } catch (error) {
+    await recordBossAutoReplyPoll("error", error?.message || String(error));
+  } finally {
+    bossAutoReplyPollInFlight = false;
   }
 }
 
@@ -627,7 +743,9 @@ chrome.runtime.onInstalled.addListener(() => migrateLegacyConnectionDefaults().t
 chrome.runtime.onStartup.addListener(() => migrateLegacyConnectionDefaults().then(connect));
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 chrome.alarms.create("jobdeck-heartbeat", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => {
-  if (!socket || socket.readyState > WebSocket.OPEN) connect();
+chrome.alarms.create(BOSS_AUTO_REPLY_ALARM, { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "jobdeck-heartbeat" && (!socket || socket.readyState > WebSocket.OPEN)) connect();
+  if (alarm.name === BOSS_AUTO_REPLY_ALARM) pollBossAutoReply();
 });
 migrateLegacyConnectionDefaults().then(connect);

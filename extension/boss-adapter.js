@@ -7,35 +7,116 @@ function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
       bounds: { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) }
     };
   };
-  const firstVisible = (selectors) => {
+  const firstVisibleWithin = (root, selectors) => {
+    if (!root) return null;
     for (const selector of selectors) {
-      const element = [...document.querySelectorAll(selector)].find(visible);
+      const ownMatch = root.matches?.(selector) && visible(root) ? root : null;
+      const element = ownMatch || [...root.querySelectorAll(selector)].find(visible);
       if (element) return element;
     }
     return null;
   };
-  const firstText = (selectors, limit = 8000) => {
+  const firstVisible = (selectors) => firstVisibleWithin(document, selectors);
+  const firstTextWithin = (root, selectors, limit = 8000) => {
+    if (!root) return "";
     for (const selector of selectors) {
-      const element = document.querySelector(selector);
+      const element = root.matches?.(selector) && visible(root)
+        ? root
+        : [...root.querySelectorAll(selector)].find(visible);
       const text = compact(element?.innerText || element?.textContent || "", limit);
       if (text) return text;
     }
     return "";
   };
-  const composer = firstVisible([
+  const selectedConversation = firstVisible([
+    "[data-conversation-id][aria-selected='true']",
+    "[data-conversation-id].active",
+    "[data-chat-id][aria-selected='true']",
+    "[data-chat-id].active",
+    "[data-boss-id][aria-selected='true']",
+    "[data-boss-id].active",
+    "[class*='chat-item'][class*='active']",
+    "[class*='conversation-item'][class*='active']"
+  ]);
+  const composerSelectors = [
     "textarea[placeholder*='消息']",
     "textarea[placeholder*='回复']",
     "[contenteditable='true'][role='textbox']",
     "textarea",
     "[contenteditable='true']"
-  ]);
+  ];
+  const messageListSelectors = [
+    ".chat-record",
+    ".message-list",
+    "[class*='message-list']",
+    "[class*='chat-record']",
+    "[role='log']"
+  ];
+  const messageProbeSelectors = [
+    "[data-message-id]",
+    "[data-msg-id]",
+    "[data-messageid]",
+    ".message-item",
+    ".chat-message",
+    ".chat-record > li"
+  ];
+  const chatPanelSelector = [
+    "[data-conversation-panel]",
+    "[data-chat-panel]",
+    "[role='main'][class*='chat']",
+    ".chat-conversation",
+    ".chat-dialog",
+    ".chat-container",
+    "[class*='conversation-content']",
+    "[class*='chat-content']",
+    "[class*='message-panel']"
+  ].join(",");
+  const panelMessageList = (panel) => firstVisibleWithin(panel, messageListSelectors)
+    || (messageProbeSelectors.some((selector) => firstVisibleWithin(panel, [selector])) ? panel : null);
+  const panelComposer = (panel) => firstVisibleWithin(panel, composerSelectors);
+  const controlledPanel = (() => {
+    if (!selectedConversation) return null;
+    const target = [
+      selectedConversation.getAttribute("aria-controls"),
+      selectedConversation.getAttribute("data-target"),
+      selectedConversation.getAttribute("href")
+    ].find(Boolean);
+    if (!target) return null;
+    const id = String(target).replace(/^#/, "").trim();
+    if (!id) return null;
+    const panel = document.getElementById?.(id);
+    return panel && visible(panel) && panelComposer(panel) && panelMessageList(panel) ? panel : null;
+  })();
+  const composerPanels = [...document.querySelectorAll(composerSelectors.join(","))]
+    .filter(visible)
+    .flatMap((composerCandidate) => {
+      let node = composerCandidate.parentElement;
+      while (node) {
+        if (node.matches?.(chatPanelSelector) && panelComposer(node) && panelMessageList(node)) return [node];
+        node = node.parentElement;
+      }
+      return [];
+    });
+  const visiblePanels = [...document.querySelectorAll(chatPanelSelector)]
+    .filter(visible)
+    .filter((panel) => panelComposer(panel) && panelMessageList(panel));
+  const panelCandidates = [...new Set([...composerPanels, ...visiblePanels])]
+    // If both a broad page container and its actual conversation panel match,
+    // keep the smallest descendant that still owns the composer and messages.
+    .filter((panel, _index, panels) => !panels.some((other) => other !== panel && panel.contains(other)));
+  const chatPanel = controlledPanel || (panelCandidates.length === 1 ? panelCandidates[0] : null);
+  const scopeReliable = Boolean(chatPanel);
+  const scopeReason = scopeReliable ? "selected-chat-panel"
+    : panelCandidates.length > 1 ? "ambiguous-chat-panel" : "missing-chat-panel";
+  const composer = firstVisibleWithin(chatPanel, composerSelectors);
   const composerValue = composer
     ? compact("value" in composer ? composer.value : composer.innerText || composer.textContent || "", 1200)
     : "";
 
-  // Use one message-container family at a time. Combining broad selectors
-  // groups parent bubbles with their content descendants and destroys both
-  // chronological order and occurrence counts used for send verification.
+  // BOSS currently mixes several message-container families in the same
+  // conversation (especially across historical and newly appended bubbles).
+  // Collect every family, normalize descendants back to their message root,
+  // then de-duplicate in DOM order so send verification sees the full chat.
   const primaryMessageSelectors = [
     "[data-message-id]",
     "[data-msg-id]",
@@ -58,29 +139,27 @@ function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
     ".chat-message",
     ".chat-record > li"
   ].join(",");
-  const visibleFor = (selector) => [...document.querySelectorAll(selector)].filter(visible);
-  let messageElements = [];
-  for (const selector of [...primaryMessageSelectors, ...fallbackMessageSelectors]) {
-    const rawCandidates = visibleFor(selector);
-    const candidates = fallbackMessageSelectors.includes(selector)
-      ? rawCandidates.filter((element) => !rawCandidates.some((other) => other !== element && element.contains(other)))
-      : rawCandidates;
-    if (!candidates.length) continue;
-    messageElements = [...new Set(candidates.map((element) => element.closest(messageRoots) || element))]
-      .filter(visible)
-      .sort((left, right) => {
-        if (left === right) return 0;
-        return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-      });
-    break;
-  }
+  const messageList = panelMessageList(chatPanel);
+  const visibleFor = (selector) => messageList
+    ? [...messageList.querySelectorAll(selector)].filter(visible)
+    : [];
+  const messageElements = [...new Set(
+    [...primaryMessageSelectors, ...fallbackMessageSelectors]
+      .flatMap((selector) => visibleFor(selector))
+      .map((element) => element.closest(messageRoots) || element)
+  )]
+    .filter(visible)
+    // Broad fallback selectors can yield both an outer bubble and its content
+    // node. Keep the leaf unless the outer node is a recognized message root;
+    // recognized roots carry the durable message identity when available.
+    .filter((element, _index, elements) => element.matches(messageRoots)
+      || !elements.some((other) => other !== element && element.contains(other)))
+    .sort((left, right) => {
+      if (left === right) return 0;
+      return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
 
-  const chatRoot = firstVisible([
-    ".chat-conversation",
-    ".chat-record",
-    "[class*='message-list']",
-    "[class*='chat-content']"
-  ]);
+  const chatRoot = messageList || chatPanel;
   const chatRect = chatRoot?.getBoundingClientRect();
   const stableMessageId = (element) => {
     for (const attr of ["data-message-id", "data-msg-id", "data-messageid"]) {
@@ -90,14 +169,28 @@ function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
     if (element.id) return { id: `id:${element.id}`, source: "element-id" };
     return { id: `selector:${selectorFor(element)}`, source: "selector" };
   };
-  const messageText = (element) => {
-    const content = [
+  const messageContent = (element) => [
       ".message-content",
       "[class*='message-content']",
       ".bubble-content",
       "[class*='bubble-content']"
-    ].map((selector) => element.querySelector(selector)).find((candidate) => candidate && visible(candidate));
+    ].map((selector) => element.querySelector(selector)).find((candidate) => candidate && visible(candidate)) || element;
+  const messageText = (element) => {
+    const content = messageContent(element);
     return compact(content?.innerText || content?.textContent || element.innerText || element.textContent || "", 1200);
+  };
+  const systemMessage = (element, text) => {
+    const roleElement = element.closest("[role], [data-type], [data-message-type], [data-kind]") || element;
+    const hint = compact([
+      roleElement.getAttribute("role"),
+      roleElement.getAttribute("data-type"),
+      roleElement.getAttribute("data-message-type"),
+      roleElement.getAttribute("data-kind"),
+      String(roleElement.className || ""),
+      String(element.className || "")
+    ].filter(Boolean).join(" "), 800);
+    if (/(?:^|[-_\s])(system|notice|notification|status|platform|competition|pk-card)(?:$|[-_\s])/i.test(hint)) return true;
+    return /(?:你与该职位竞争者\s*PK\s*情况|竞争者\s*PK|优秀竞争者|查看详细分析|平台安全提示|系统通知|系统消息)/i.test(text);
   };
   const messageFrom = (element) => {
     const roleElement = element.closest("[data-from], [data-direction], [data-owner]") || element;
@@ -113,23 +206,39 @@ function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
       String(roleElement.className || ""),
       String(element.parentElement?.className || "")
     ].filter(Boolean).join(" "), 600);
-    if (/candidate|self|mine|my(?:-|_|\b)|right|sent|outgoing|from-me/i.test(roleHint)) return "candidate";
-    if (/recruiter|other|left|received|incoming|from-other|friend/i.test(roleHint)) return "recruiter";
-    const rect = element.getBoundingClientRect();
-    const center = rect.left + rect.width / 2;
-    const conversationCenter = chatRect ? chatRect.left + chatRect.width / 2 : innerWidth / 2;
-    return center > conversationCenter ? "candidate" : "recruiter";
+    if (/candidate|self|mine|my(?:-|_|\b)|sent|outgoing|from-me|item-myself|message-self/i.test(roleHint)) return "candidate";
+    if (/recruiter|other|received|incoming|from-other|friend|item-friend|message-receive/i.test(roleHint)) return "recruiter";
+
+    // Geometry is only evidence when a compact bubble is very clearly pinned
+    // to one side of the active conversation. Full-width/central cards are not
+    // recruiter messages and must remain unknown.
+    const rect = messageContent(element).getBoundingClientRect();
+    if (!chatRect || !rect.width || rect.width > chatRect.width * 0.72) return "unknown";
+    const leftGap = Math.max(0, rect.left - chatRect.left);
+    const rightGap = Math.max(0, chatRect.right - rect.right);
+    const separation = Math.max(36, chatRect.width * 0.12);
+    if (leftGap - rightGap >= separation && rightGap <= leftGap * 0.3) return "candidate";
+    if (rightGap - leftGap >= separation && leftGap <= rightGap * 0.3) return "recruiter";
+    return "unknown";
   };
 
   const records = messageElements.flatMap((element) => {
     const text = messageText(element);
     if (!text) return [];
     const identity = stableMessageId(element);
-    return [{ element, id: identity.id, idSource: identity.source, from: messageFrom(element), text }];
+    return [{
+      element,
+      id: identity.id,
+      idSource: identity.source,
+      from: systemMessage(element, text) ? "system" : messageFrom(element),
+      text
+    }];
   });
   const deduped = [];
+  const identityRank = (record) => record.idSource === "attribute" ? 3
+    : record.idSource === "element-id" ? 2 : 1;
   for (const record of records) {
-    const duplicate = deduped.some((existing) => {
+    const duplicateIndex = deduped.findIndex((existing) => {
       if (existing.id === record.id) return true;
       const nested = existing.element.contains(record.element) || record.element.contains(existing.element);
       if (!nested || existing.from !== record.from) return false;
@@ -137,29 +246,30 @@ function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
         || existing.text.includes(record.text)
         || record.text.includes(existing.text);
     });
-    if (!duplicate) deduped.push(record);
+    if (duplicateIndex < 0) {
+      deduped.push(record);
+    } else if (identityRank(record) > identityRank(deduped[duplicateIndex])) {
+      // Keep the chronological slot, but prefer a durable attribute/id over a
+      // selector-derived identity for restart-safe reply de-duplication.
+      deduped[duplicateIndex] = record;
+    }
   }
-  const messages = deduped.slice(-30).map(({ id, idSource, from, text }) => ({ id, idSource, from, text }));
-  const transcript = messages.length ? "" : firstText([
-    ".chat-conversation",
+  const latestSenderUnknown = deduped.at(-1)?.from === "unknown";
+  // The server intentionally ignores unknown senders. Suppress older known
+  // messages while an ambiguous newest bubble is visible, otherwise it could
+  // answer a stale recruiter question as if the ambiguous bubble did not exist.
+  const safeRecords = latestSenderUnknown ? [deduped.at(-1)] : deduped;
+  const messages = safeRecords.filter(Boolean).slice(-30).map(({ id, idSource, from, text }) => ({ id, idSource, from, text }));
+  const transcript = messages.length ? "" : firstTextWithin(chatPanel, [
     ".chat-record",
+    "[class*='message-list']",
     "[class*='chat-content']"
   ], 8000);
 
-  const selectedConversation = firstVisible([
-    "[data-conversation-id][aria-selected='true']",
-    "[data-conversation-id].active",
-    "[data-chat-id][aria-selected='true']",
-    "[data-chat-id].active",
-    "[data-boss-id][aria-selected='true']",
-    "[data-boss-id].active",
-    "[class*='chat-item'][class*='active']",
-    "[class*='conversation'][class*='active']"
-  ]);
   let conversationId = "";
   let conversationIdSource = "";
   for (const attr of ["data-conversation-id", "data-chat-id", "data-boss-id", "data-friend-id"]) {
-    const value = selectedConversation?.getAttribute(attr);
+    const value = selectedConversation?.getAttribute(attr) || chatPanel?.getAttribute(attr);
     if (!value) continue;
     conversationId = compact(value, 240);
     conversationIdSource = attr;
@@ -180,12 +290,66 @@ function jobdeckBossChatSnapshot({ compact, visible, selectorFor }) {
     }
   }
 
+  const recruiter = firstTextWithin(chatPanel, [".chat-info .name", ".user-name", "[class*='chat-header'] [class*='name']"], 160);
+  const jobTitle = firstTextWithin(chatPanel, [".chat-job", ".job-name", "[class*='job-title']"], 180);
+  const company = firstTextWithin(chatPanel, [".company-name", "[class*='company-name']"], 180);
+  const stableBossJobUrl = (value) => {
+    try {
+      const url = new URL(value, location.href);
+      if (url.protocol !== "https:" || !/(^|\.)zhipin\.com$/i.test(url.hostname)) return "";
+      if (!/(?:job_detail|\/job\/)/i.test(url.pathname)) return "";
+      // Query parameters frequently contain short-lived tracking/security
+      // values.  The pathname is the stable job identity used to associate a
+      // chat with the saved full JD.
+      return `${url.origin}${url.pathname}`;
+    } catch {
+      return "";
+    }
+  };
+  const jobLinkRoots = [
+    firstVisibleWithin(chatPanel, [".chat-info", ".chat-header", "[class*='chat-header']", "[class*='chat-info']"]),
+    firstVisibleWithin(chatPanel, [".chat-job", ".job-name", "[class*='job-title']"])?.closest("header, section, article, div")
+  ].filter(Boolean);
+  const scopedJobLinks = jobLinkRoots.flatMap((root) => [
+    ...(root.matches?.("a[href]") ? [root] : []),
+    ...root.querySelectorAll("a[href]")
+  ]);
+  const panelJobLinks = chatPanel
+    ? [...chatPanel.querySelectorAll("a[href*='job_detail'], a[href*='/job/']")].filter(visible)
+    : [];
+  const jobLinks = [...new Set([...scopedJobLinks, ...panelJobLinks])]
+    .flatMap((anchor) => {
+      const url = stableBossJobUrl(anchor.href || anchor.getAttribute("href"));
+      if (!url) return [];
+      const context = compact((anchor.closest("header, section, article, li, [class*='chat']") || anchor).innerText, 600);
+      const identityMatch = Boolean(
+        (jobTitle && context.includes(jobTitle))
+        || (company && context.includes(company))
+      );
+      const scoped = jobLinkRoots.some((root) => root === anchor || root.contains(anchor));
+      return [{ url, identityMatch, scoped }];
+    });
+  const preferredJobUrls = [...new Set(
+    jobLinks.filter((item) => item.scoped || item.identityMatch).map((item) => item.url)
+  )];
+  const allJobUrls = [...new Set(jobLinks.map((item) => item.url))];
+  // A chat page can retain links from several conversations.  Never guess
+  // between conflicting job identities: the server can safely report
+  // `missing-jd` instead of replying against the wrong JD.
+  const jobUrl = preferredJobUrls.length === 1
+    ? preferredJobUrls[0]
+    : preferredJobUrls.length === 0 && allJobUrls.length === 1 ? allJobUrls[0] : "";
+
   return {
-    recruiter: firstText([".chat-info .name", ".user-name", "[class*='chat'] [class*='name']"], 160),
-    jobTitle: firstText([".chat-job", ".job-name", "[class*='job-title']"], 180),
-    company: firstText([".company-name", "[class*='company-name']"], 180),
+    recruiter,
+    jobTitle,
+    company,
+    jobUrl,
     conversationId,
     conversationIdSource,
+    scopeReliable,
+    scopeReason,
+    senderReliable: !latestSenderUnknown,
     messages,
     transcript,
     composer: composer ? {

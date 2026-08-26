@@ -7,6 +7,11 @@ import { isJobSearchExecutionIntent, requestedApplicationTarget } from "./agent-
 import { GoalAgentRuntime } from "./agent-runtime.mjs";
 import { AIService } from "./ai.mjs";
 import { findPageControl, rankAnalyzedJobs, verificationReason } from "./autopilot.mjs";
+import {
+  bossConversationKey,
+  bossRecruiterMessageState,
+  resolveBossReplyJob
+} from "./boss-replies.mjs";
 import { CONTROLLED } from "./bridge.mjs";
 import { bossResumeEvidence, hasCandidateEvidence } from "./candidate-evidence.mjs";
 import { DEFAULT_HOST, DEFAULT_PORT } from "./defaults.mjs";
@@ -38,6 +43,7 @@ tenantRuntime.attach(server);
 const starRewards = new StarRewardService({ sub2api });
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
 const remoteMode = multiUserMode || !loopbackHosts.has(DEFAULT_HOST);
+const bossReplyLocks = new Set();
 
 if (!loopbackHosts.has(DEFAULT_HOST) && !multiUserMode) {
   const accessToken = String(process.env.JOBDECK_ACCESS_TOKEN || "").trim();
@@ -904,6 +910,69 @@ function normalizedBossChatUrl(value) {
   }
 }
 
+function normalizedBossReplyTargetText(value, limit = 4000) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+}
+
+function bossReplyTargetMessageRecords(chat = {}) {
+  return (Array.isArray(chat.messages) ? chat.messages : [])
+    .map((message, index) => ({
+      index,
+      from: normalizedBossReplyTargetText(message?.from, 40).toLowerCase(),
+      text: normalizedBossReplyTargetText(message?.text),
+      id: normalizedBossReplyTargetText(message?.id, 500),
+      idSource: normalizedBossReplyTargetText(message?.idSource, 80).toLowerCase()
+    }))
+    .filter((message) => message.from || message.text || message.id);
+}
+
+function bossReplyTargetFingerprint(chat = {}, recordIndex = null) {
+  const conversationId = normalizedBossReplyTargetText(chat.conversationId, 1000);
+  const records = bossReplyTargetMessageRecords(chat);
+  const selectedIndex = Number.isInteger(recordIndex) ? recordIndex : records.length - 1;
+  const message = records[selectedIndex];
+  if (!conversationId || !message) return "";
+  const durableId = message.id && !["synthetic", "fallback", "index"].includes(message.idSource);
+  const occurrence = records.slice(0, selectedIndex + 1)
+    .filter((candidate) => candidate.from === message.from && candidate.text === message.text)
+    .length;
+  return JSON.stringify({
+    conversationId,
+    from: message.from,
+    identity: durableId
+      ? { id: message.id, idSource: message.idSource || "attribute" }
+      : { text: message.text, occurrence }
+  });
+}
+
+function bossReplyTargetMessageFingerprints(chat = {}) {
+  return bossReplyTargetMessageRecords(chat).map((_message, index) => bossReplyTargetFingerprint(chat, index));
+}
+
+function normalizeBossReplyTarget(value) {
+  if (!value || typeof value !== "object") return null;
+  const target = {
+    tabId: Number(value.tabId),
+    conversationId: normalizedBossReplyTargetText(value.conversationId, 1000),
+    fingerprint: String(value.fingerprint || "").trim().slice(0, 12000)
+  };
+  if (!Number.isInteger(target.tabId) || target.tabId <= 0 || !target.conversationId || !target.fingerprint) {
+    throw new Error("自动回复请求缺少明确的 tabId、conversationId 或 fingerprint");
+  }
+  return target;
+}
+
+function bossReplyTargetFromPage(page, tabId) {
+  return normalizeBossReplyTarget({
+    tabId,
+    conversationId: page?.boss?.chat?.conversationId,
+    fingerprint: bossReplyTargetFingerprint(page?.boss?.chat || {})
+  });
+}
+
 function bossChatSession(page, tabId) {
   const chat = page?.boss?.chat || {};
   return {
@@ -913,16 +982,19 @@ function bossChatSession(page, tabId) {
     conversationIdSource: String(chat.conversationIdSource || "").trim(),
     recruiter: String(chat.recruiter || "").trim(),
     jobTitle: String(chat.jobTitle || "").trim(),
-    company: String(chat.company || "").trim()
+    company: String(chat.company || "").trim(),
+    jobUrl: normalizedBossChatUrl(chat.jobUrl || "")
   };
 }
 
 function bossChatSessionMatches(page, binding, tabId = null) {
   if (!binding || page?.adapter !== "boss-zhipin" || page?.pageType !== "chat") return false;
   if (binding.tabId && Number(tabId) !== Number(binding.tabId)) return false;
-  if (binding.url && normalizedBossChatUrl(page?.url) !== binding.url) return false;
   const chat = page?.boss?.chat || {};
+  // The conversation id is more stable than BOSS' URL, which can gain or lose
+  // transient query parameters while remaining on the same recruiter thread.
   if (binding.conversationId) return String(chat.conversationId || "").trim() === binding.conversationId;
+  if (binding.url && normalizedBossChatUrl(page?.url) !== binding.url) return false;
   const readable = [
     [binding.recruiter, chat.recruiter],
     [binding.jobTitle, chat.jobTitle],
@@ -934,6 +1006,21 @@ function bossChatSessionMatches(page, binding, tabId = null) {
     const right = normalizedResumeText(actual);
     return right && (left.includes(right) || right.includes(left));
   });
+}
+
+function bossReplyTargetMatches(page, target, tabId = null, { requireLatest = true } = {}) {
+  if (!target || page?.adapter !== "boss-zhipin" || page?.pageType !== "chat") return false;
+  if (Number(tabId) !== Number(target.tabId)) return false;
+  const chat = page?.boss?.chat || {};
+  if (normalizedBossReplyTargetText(chat.conversationId, 1000) !== target.conversationId) return false;
+  if (requireLatest) return bossReplyTargetFingerprint(chat) === target.fingerprint;
+  return bossReplyTargetMessageFingerprints(chat).includes(target.fingerprint);
+}
+
+function assertBossReplyTarget(page, target, tabId, phase, options = {}) {
+  if (!bossReplyTargetMatches(page, target, tabId, options)) {
+    throw new Error(`BOSS 目标对话在${phase}前已变化，未继续自动回复`);
+  }
 }
 
 async function waitForBoundBossChat(runId, binding, predicate, description, attempts = 10) {
@@ -1572,6 +1659,531 @@ function bossSendWasVerified(before, page, greeting, job, chatSession = null, ta
   return hasNewMatchingId || hasNewMatchingOccurrence;
 }
 
+function bossReplySendWasVerified(before, page, reply, chatSession, tabId = null) {
+  if (page?.adapter !== "boss-zhipin" || page?.pageType !== "chat") return false;
+  if (!bossChatSessionMatches(page, chatSession, tabId)) return false;
+  if (!Array.isArray(page?.boss?.chat?.messages) || bossComposerValue(page)) return false;
+  const after = outboundGreetingEvidence(page, reply);
+  const baselineIds = new Set(before?.stableMessageIds || []);
+  const hasNewMatchingId = after.matchingStableIds.some((id) => !baselineIds.has(id));
+  const hasNewMatchingOccurrence = after.outboundCount > Number(before?.outboundCount || 0)
+    && after.matchingCount > Number(before?.matchingCount || 0);
+  return hasNewMatchingId || hasNewMatchingOccurrence;
+}
+
+function currentAutoReplyState() {
+  return {
+    enabled: true,
+    status: "idle",
+    message: "等待招聘方新消息",
+    pending: null,
+    processed: {},
+    recent: [],
+    conversationBindings: {},
+    lastFingerprint: "",
+    lastSentAt: null,
+    lastError: "",
+    updatedAt: null,
+    ...(store.state.workflow.autoReply || {})
+  };
+}
+
+function setAutoReply(patch) {
+  return store.update((state) => {
+    state.workflow.autoReply = {
+      enabled: true,
+      status: "idle",
+      message: "等待招聘方新消息",
+      pending: null,
+      processed: {},
+      recent: [],
+      conversationBindings: {},
+      lastFingerprint: "",
+      lastSentAt: null,
+      lastError: "",
+      updatedAt: null,
+      ...(state.workflow.autoReply || {}),
+      ...patch,
+      updatedAt: new Date().toISOString()
+    };
+    state.workflow.updatedAt = state.workflow.autoReply.updatedAt;
+    return state.workflow.autoReply;
+  });
+}
+
+function rememberAutoReplyBinding(conversationKey, jobId) {
+  if (!conversationKey || !jobId) return;
+  store.update((state) => {
+    const autoReply = state.workflow.autoReply || {};
+    state.workflow.autoReply = {
+      ...autoReply,
+      conversationBindings: {
+        ...(autoReply.conversationBindings || {}),
+        [conversationKey]: jobId
+      },
+      updatedAt: new Date().toISOString()
+    };
+  });
+}
+
+function forgetAutoReplyBinding(conversationKey, jobId = "") {
+  if (!conversationKey) return;
+  store.update((state) => {
+    const autoReply = state.workflow.autoReply || {};
+    const bindings = { ...(autoReply.conversationBindings || {}) };
+    if (!jobId || bindings[conversationKey] === jobId) delete bindings[conversationKey];
+    state.workflow.autoReply = {
+      ...autoReply,
+      conversationBindings: bindings,
+      updatedAt: new Date().toISOString()
+    };
+  });
+}
+
+function completeAutoReply({ fingerprint, conversationKey, status, message, job = null, reply = "", reason = "" }) {
+  const now = new Date().toISOString();
+  const entry = {
+    fingerprint,
+    conversationKey,
+    status,
+    message,
+    reason,
+    reply,
+    jobId: job?.id || "",
+    jobTitle: job?.title || "",
+    company: job?.company || "",
+    processedAt: now
+  };
+  return store.update((state) => {
+    const autoReply = state.workflow.autoReply || {};
+    const processedEntries = Object.entries({ ...(autoReply.processed || {}), [fingerprint]: entry }).slice(-160);
+    state.workflow.autoReply = {
+      ...autoReply,
+      status,
+      message,
+      pending: null,
+      processed: Object.fromEntries(processedEntries),
+      recent: [entry, ...(autoReply.recent || []).filter((item) => item?.fingerprint !== fingerprint)].slice(0, 60),
+      lastFingerprint: fingerprint,
+      lastSentAt: status === "sent" ? now : autoReply.lastSentAt || null,
+      lastError: status === "error" ? reason || message : "",
+      updatedAt: now
+    };
+    state.workflow.updatedAt = now;
+    return entry;
+  });
+}
+
+function autoReplyControlBusy() {
+  const workflow = store.state.workflow || {};
+  const autopilotRunning = String(workflow.autopilot?.status || "").startsWith("running-");
+  const resumeRunning = ["preparing", "running"].includes(String(workflow.resumeApply?.status || ""));
+  return autopilotRunning || resumeRunning;
+}
+
+async function inspectBossReplyChat(target = null) {
+  if (target) {
+    const page = await bridge.execute({ kind: "inspect", tabId: target.tabId });
+    assertBossReplyTarget(page, target, target.tabId, "预检");
+    return { page, tabId: target.tabId };
+  }
+  return inspectBossPageFollowingTabs(
+    null,
+    ["chat"],
+    (page) => page?.pageType === "chat" && Boolean(page?.boss?.chat)
+  );
+}
+
+async function waitForBossReplyChat(binding, predicate, description, attempts = 10) {
+  if (!binding?.tabId) throw new Error(`${description}缺少会话标签页身份，无法安全继续`);
+  let lastPage = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (bridge.paused) throw new Error("浏览器操作已暂停");
+    await sleep(attempt === 0 ? 500 : 420);
+    lastPage = await bridge.execute({ kind: "inspect", tabId: binding.tabId });
+    const verification = verificationReason(lastPage);
+    if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
+    if (!bossChatSessionMatches(lastPage, binding, binding.tabId)) {
+      throw new Error("BOSS 当前对话已切换，未继续发送回复");
+    }
+    if (predicate(lastPage)) return { page: lastPage, tabId: binding.tabId };
+  }
+  throw new Error(`${description}验证超时`);
+}
+
+function resolvedReplyJob(chatState) {
+  const autoReply = currentAutoReplyState();
+  const boundJobId = autoReply.conversationBindings?.[chatState.conversationKey];
+  if (boundJobId) {
+    const job = store.state.jobs.find((entry) => entry.id === boundJobId);
+    if (normalizedBossMessageText(job?.description).length >= 120) {
+      const chat = chatState.chat || {};
+      const currentIdentity = normalizedBossMessageText(chat.jobUrl)
+        || normalizedBossMessageText(chat.jobTitle)
+        || normalizedBossMessageText(chat.company);
+      const bindingMatch = currentIdentity ? resolveBossReplyJob(chat, [job]) : { status: "resolved" };
+      if (bindingMatch.status === "resolved") {
+        return { status: "resolved", matchedBy: "conversation-binding", job };
+      }
+      // The recruiter can switch the role associated with an existing chat.
+      // Never let that stale binding supply a different job's JD later.
+      forgetAutoReplyBinding(chatState.conversationKey, boundJobId);
+    }
+  }
+  return resolveBossReplyJob(chatState.chat || {}, store.state.jobs);
+}
+
+function replyResult(status, message, extra = {}) {
+  return { status, message, ...extra };
+}
+
+async function hydrateReplyJobFromChat({ page, tabId, chatState, replyTarget }) {
+  const targetJobUrl = String(chatState.chat?.jobUrl || "").trim();
+  if (!targetJobUrl) {
+    return {
+      status: "missing",
+      reason: "当前招聘对话没有提供可验证的岗位链接，无法安全读取对应完整 JD",
+      candidates: []
+    };
+  }
+
+  const chatSession = bossChatSession(page, tabId);
+  assertBossReplyTarget(page, replyTarget, tabId, "读取 JD");
+  const originalFingerprint = chatState.fingerprint;
+  let opened = null;
+  let detailPage = null;
+  let hydratedJob = null;
+  try {
+    setAutoReply({
+      status: "checking",
+      message: "正在打开当前对话对应的岗位并读取完整 JD…",
+      lastError: ""
+    });
+    opened = await bridge.execute({ kind: "openBossJob", url: chatState.chat.jobUrl });
+    if (!opened?.id) throw new Error("BOSS 岗位详情页没有返回稳定标签页身份");
+
+    for (let attempt = 0; attempt < 14; attempt += 1) {
+      if (bridge.paused) throw new Error("浏览器操作已暂停");
+      await sleep(attempt === 0 ? 900 : 520);
+      detailPage = await bridge.execute({ kind: "inspect", tabId: opened.id }).catch(() => null);
+      if (!detailPage) continue;
+      const verification = verificationReason(detailPage);
+      if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
+      const description = normalizedBossMessageText(detailPage?.boss?.job?.description);
+      if (detailPage.adapter === "boss-zhipin" && detailPage.boss?.job && description.length >= 120) break;
+    }
+
+    const description = normalizedBossMessageText(detailPage?.boss?.job?.description);
+    if (detailPage?.adapter !== "boss-zhipin" || !detailPage?.boss?.job || description.length < 120) {
+      throw new Error("未能从当前对话对应的岗位页读取完整 JD");
+    }
+    const inspectedJobUrl = detailPage.boss.job.url || detailPage.url;
+    if (!sameJobUrl(inspectedJobUrl, targetJobUrl)) {
+      throw new Error("打开的岗位与当前招聘对话不一致，未生成或发送回复");
+    }
+
+    hydratedJob = upsertDetailedJob(detailPage, null, targetJobUrl);
+    rememberAutoReplyBinding(chatState.conversationKey, hydratedJob.id);
+  } finally {
+    if (tabId) await bridge.execute({ kind: "activateTab", tabId }).catch(() => {});
+  }
+
+  const restored = await waitForBossReplyChat(chatSession, () => true, "返回原招聘对话", 10);
+  assertBossReplyTarget(restored.page, replyTarget, restored.tabId, "返回招聘对话");
+  const restoredChat = restored.page.boss.chat;
+  const restoredState = {
+    ...bossRecruiterMessageState(restoredChat, currentAutoReplyState()),
+    chat: restoredChat
+  };
+  if (restoredState.fingerprint !== originalFingerprint) {
+    throw new Error("读取 JD 期间招聘方发来了新消息，已停止并等待重新生成回复");
+  }
+  if (restoredState.status !== "eligible") {
+    throw new Error(restoredState.reason || "返回招聘对话后消息状态已变化，未继续发送");
+  }
+
+  return {
+    status: "resolved",
+    matchedBy: "hydrated-job-url",
+    job: hydratedJob,
+    page: restored.page,
+    tabId: restored.tabId,
+    chat: restoredChat,
+    chatState: restoredState
+  };
+}
+
+async function sendVerifiedBossReply({ page, tabId, chatState, job, reply, replyTarget = null, existingPending = null }) {
+  const lockedTarget = normalizeBossReplyTarget(existingPending?.replyTarget || replyTarget)
+    || bossReplyTargetFromPage(page, tabId);
+  const recoveringClickedSend = existingPending?.phase === "send-clicked";
+  assertBossReplyTarget(page, lockedTarget, tabId, "准备填写", { requireLatest: !recoveringClickedSend });
+  const chatSession = existingPending?.chatSession || bossChatSession(page, tabId);
+  if (!bossChatSessionMatches(page, chatSession, tabId)) {
+    throw new Error("当前招聘对话缺少稳定身份，未填写或发送消息");
+  }
+  const before = existingPending?.before || outboundGreetingEvidence(page, reply);
+  const baseOperationId = `boss-reply:${chatState.fingerprint}`;
+  const typeOperationId = existingPending?.typeOperationId
+    || bossSessionOperationId(`${baseOperationId}:type`, chatSession);
+  const sendOperationId = existingPending?.sendOperationId
+    || bossSessionOperationId(`${baseOperationId}:send`, chatSession);
+  const pending = {
+    fingerprint: chatState.fingerprint,
+    conversationKey: chatState.conversationKey,
+    jobId: job.id,
+    reply,
+    before,
+    chatSession,
+    replyTarget: lockedTarget,
+    typeOperationId,
+    sendOperationId,
+    phase: existingPending?.phase || "ready-to-type",
+    startedAt: existingPending?.startedAt || new Date().toISOString()
+  };
+  setAutoReply({ status: "sending", message: `正在按 JD 回复 ${job.company || "招聘方"}…`, pending, lastError: "" });
+
+  let current = await bridge.execute({ kind: "inspect", tabId });
+  if (!bossChatSessionMatches(current, chatSession, tabId)) throw new Error("BOSS 对话已切换，自动回复已停止");
+  assertBossReplyTarget(current, lockedTarget, tabId, "检查发送状态", { requireLatest: !recoveringClickedSend });
+  if (bossReplySendWasVerified(before, current, reply, chatSession, tabId)) return current;
+
+  const currentMessage = bossRecruiterMessageState(current.boss?.chat || {}, { processed: {} });
+  if (currentMessage.fingerprint !== chatState.fingerprint) throw new Error("招聘方在发送前又发来新消息，已停止并等待重新生成回复");
+  const existingComposer = bossComposerValue(current);
+  if (existingComposer && !bossComposerContainsGreeting(current, reply)) {
+    throw new Error("输入框已有其他内容，未覆盖用户草稿");
+  }
+
+  if (!bossComposerContainsGreeting(current, reply)) {
+    assertBossReplyTarget(current, lockedTarget, tabId, "填写回复");
+    const composer = bossComposerFromPage(current);
+    if (!composer) throw new Error("未找到 BOSS 回复输入框");
+    const composerPoint = centerOf(composer, "回复输入框");
+    setAutoReply({ pending: { ...pending, phase: "typing" }, message: "正在填写基于完整 JD 生成的回复…" });
+    await bridge.execute({ kind: "activateTab", tabId });
+    await bridge.execute({ kind: "computerMove", tabId, x: composerPoint.x, y: composerPoint.y, reason: "自动回复：移动到招聘沟通输入框" });
+    await bridge.execute({ kind: "computerClick", tabId, x: composerPoint.x, y: composerPoint.y, reason: "自动回复：聚焦招聘沟通输入框" });
+    await bridge.execute({
+      kind: "computerType",
+      tabId,
+      value: reply,
+      replace: true,
+      operationId: typeOperationId,
+      reason: `根据 ${job.company || "该公司"} / ${job.title} 的完整 JD 回答招聘方最新问题`
+    });
+  }
+
+  const typed = await waitForBossReplyChat(
+    chatSession,
+    (candidatePage) => bossReplyTargetMatches(candidatePage, lockedTarget, tabId)
+      && bossComposerContainsGreeting(candidatePage, reply),
+    "回复内容写入",
+    8
+  );
+  current = typed.page;
+  assertBossReplyTarget(current, lockedTarget, tabId, "点击发送");
+  let send = findPageControl(current, /^(?:发送|发送消息|确定发送)$/i);
+  if (!send) {
+    current = (await waitForBossReplyChat(
+      chatSession,
+      (candidatePage) => Boolean(findPageControl(candidatePage, /^(?:发送|发送消息|确定发送)$/i)),
+      "发送按钮",
+      8
+    )).page;
+    send = findPageControl(current, /^(?:发送|发送消息|确定发送)$/i);
+  }
+  if (!send) throw new Error("没有唯一识别到 BOSS 消息发送按钮，回复未发送");
+  assertBossReplyTarget(current, lockedTarget, tabId, "点击发送");
+  const sendPoint = centerOf(send, "发送按钮");
+  setAutoReply({ pending: { ...pending, phase: "send-clicking" }, message: "正在点击发送并验证回执…" });
+  await bridge.execute({ kind: "computerMove", tabId, x: sendPoint.x, y: sendPoint.y, reason: "自动回复：移动到消息发送按钮" });
+  await bridge.execute({
+    kind: "computerClick",
+    tabId,
+    x: sendPoint.x,
+    y: sendPoint.y,
+    operationId: sendOperationId,
+    reason: `自动回复：发送针对 ${job.title} JD 的事实安全回复`
+  });
+  setAutoReply({ pending: { ...pending, phase: "send-clicked" }, message: "已点击发送，正在核验聊天记录…" });
+  const verified = await waitForBossReplyChat(
+    chatSession,
+    (candidatePage) => bossReplyTargetMatches(candidatePage, lockedTarget, tabId, { requireLatest: false })
+      && bossReplySendWasVerified(before, candidatePage, reply, chatSession, tabId),
+    "回复发送结果",
+    10
+  );
+  assertBossReplyTarget(verified.page, lockedTarget, verified.tabId, "回读发送结果", { requireLatest: false });
+  return verified.page;
+}
+
+async function processCurrentBossReply({ source = "manual", target = null } = {}) {
+  const requestedTarget = normalizeBossReplyTarget(target);
+  if (source === "background" && !requestedTarget) {
+    throw new Error("后台自动回复缺少明确的目标招聘对话");
+  }
+  const tenantId = tenantRuntime.current().id;
+  if (bossReplyLocks.has(tenantId)) return replyResult("busy", "同一账号已有一条招聘回复正在处理");
+  if (!currentAutoReplyState().enabled) return replyResult("disabled", "自动回复尚未启用");
+  if (bridge.paused) return replyResult("busy", "浏览器操作已暂停");
+  if (autoReplyControlBusy()) return replyResult("busy", "自动找工作或简历修改正在控制 BOSS 页面，回复将在任务结束后继续");
+
+  bossReplyLocks.add(tenantId);
+  try {
+    setAutoReply({ status: "checking", message: "正在读取招聘方最新消息并匹配完整 JD…", lastError: "" });
+    const inspected = await inspectBossReplyChat(requestedTarget);
+    let { page, tabId } = inspected;
+    const verification = verificationReason(page);
+    if (verification) throw new Error(`BOSS 页面需要本人处理：${verification}`);
+    const replyTarget = requestedTarget || bossReplyTargetFromPage(page, tabId);
+    assertBossReplyTarget(page, replyTarget, tabId, "读取招聘方消息");
+    let chat = page.boss.chat;
+    let autoReply = currentAutoReplyState();
+    let chatState = { ...bossRecruiterMessageState(chat, autoReply), chat };
+
+    // A process restart or provider/network failure can leave a message in the
+    // pre-generation `drafting` phase. There is no browser-side effect to
+    // reconcile in that phase, so clear only that stale reservation and safely
+    // regenerate for the same recruiter message. Later phases keep their
+    // durable evidence and follow the send-recovery path below.
+    if (
+      autoReply.pending?.fingerprint === chatState.fingerprint
+      && autoReply.pending?.phase === "drafting"
+      && !autoReply.pending?.reply
+      && !autoReply.pending?.needsConfirmation
+    ) {
+      setAutoReply({
+        status: "checking",
+        message: "正在恢复上次中断的 JD 定制回复…",
+        pending: null,
+        lastError: ""
+      });
+      autoReply = currentAutoReplyState();
+      chatState = { ...bossRecruiterMessageState(chat, autoReply), chat };
+    }
+
+    if (autoReply.pending?.fingerprint === chatState.fingerprint) {
+      const pending = autoReply.pending;
+      if (pending.needsConfirmation) {
+        return replyResult("needs-confirmation", pending.reason || "该回复涉及需要本人决定的事项", {
+          reply: {
+            draft: pending.reply || "",
+            needsConfirmation: true,
+            category: pending.category || "unknown",
+            reason: pending.reason || "该回复涉及需要本人决定的事项"
+          },
+          chat,
+          job: store.state.jobs.find((entry) => entry.id === pending.jobId) || null
+        });
+      }
+      if (pending.reply && pending.jobId && pending.chatSession) {
+        const job = store.state.jobs.find((entry) => entry.id === pending.jobId);
+        if (job && bossReplySendWasVerified(pending.before, page, pending.reply, pending.chatSession, tabId)) {
+          const message = `已核验发送：${job.company || "招聘方"} / ${job.title}`;
+          completeAutoReply({ fingerprint: chatState.fingerprint, conversationKey: chatState.conversationKey, status: "sent", message, job, reply: pending.reply });
+          return replyResult("sent", message, { reply: { draft: pending.reply }, job, chat, recovered: true });
+        }
+        if (job && (pending.phase !== "send-clicked" || bossComposerContainsGreeting(page, pending.reply))) {
+          await sendVerifiedBossReply({ page, tabId, chatState, job, reply: pending.reply, replyTarget, existingPending: pending });
+          const message = `已按 JD 回复并确认发送：${job.company || "招聘方"} / ${job.title}`;
+          completeAutoReply({ fingerprint: chatState.fingerprint, conversationKey: chatState.conversationKey, status: "sent", message, job, reply: pending.reply });
+          store.addActivity(message);
+          return replyResult("sent", message, { reply: { draft: pending.reply }, job, chat, recovered: true });
+        }
+        if (pending.phase === "send-clicked") {
+          const message = "上次发送结果仍不明确；为避免重复回复，已暂停并等待本人检查";
+          setAutoReply({ status: "needs-attention", message, lastError: message });
+          return replyResult("needs-attention", message, { reply: { draft: pending.reply }, job, chat });
+        }
+      }
+    }
+
+    if (["waiting", "blocked", "duplicate"].includes(chatState.status)) {
+      setAutoReply({ status: chatState.status, message: chatState.reason, lastError: "" });
+      return replyResult(chatState.status, chatState.reason, { chat });
+    }
+    if (chatState.status === "ignored") {
+      completeAutoReply({ fingerprint: chatState.fingerprint, conversationKey: chatState.conversationKey, status: "ignored", message: chatState.reason, reason: chatState.reason });
+      return replyResult("ignored", chatState.reason, { chat });
+    }
+    if (chatState.status !== "eligible") return replyResult("waiting", chatState.reason || "暂无可处理的新消息", { chat });
+
+    let resolution = resolvedReplyJob(chatState);
+    if (resolution.status === "missing" && chat.jobUrl) {
+      const hydrated = await hydrateReplyJobFromChat({ page, tabId, chatState, replyTarget });
+      if (hydrated.status === "resolved") {
+        resolution = hydrated;
+        page = hydrated.page;
+        tabId = hydrated.tabId;
+        chat = hydrated.chat;
+        chatState = hydrated.chatState;
+      } else {
+        resolution = hydrated;
+      }
+    }
+    if (resolution.status !== "resolved") {
+      const status = resolution.status === "ambiguous" ? "ambiguous-jd" : "missing-jd";
+      setAutoReply({ status, message: resolution.reason, lastError: resolution.reason });
+      return replyResult(status, resolution.reason, { chat, candidates: resolution.candidates || [] });
+    }
+    const job = resolution.job;
+    rememberAutoReplyBinding(chatState.conversationKey, job.id);
+    setAutoReply({
+      status: "drafting",
+      message: `正在结合 ${job.company || "该公司"} / ${job.title} 的完整 JD 生成回复…`,
+      pending: {
+        fingerprint: chatState.fingerprint,
+        conversationKey: chatState.conversationKey,
+        jobId: job.id,
+        replyTarget,
+        phase: "drafting",
+        startedAt: new Date().toISOString()
+      }
+    });
+    const reply = await ai.draftBossReply({ chat, job, latestInbound: chatState.message });
+    if (reply.action === "ignore") {
+      const message = reply.reason || "该消息无需回复";
+      completeAutoReply({ fingerprint: chatState.fingerprint, conversationKey: chatState.conversationKey, status: "ignored", message, reason: message, job });
+      return replyResult("ignored", message, { reply, job, chat });
+    }
+    if (reply.needsConfirmation) {
+      const message = reply.reason || "该回复涉及需要本人决定的事项";
+      setAutoReply({
+        status: "needs-confirmation",
+        message,
+        pending: {
+          fingerprint: chatState.fingerprint,
+          conversationKey: chatState.conversationKey,
+          jobId: job.id,
+          replyTarget,
+          needsConfirmation: true,
+          reason: message,
+          reply: reply.draft || "",
+          category: reply.category || "unknown",
+          phase: "needs-confirmation",
+          startedAt: new Date().toISOString()
+        }
+      });
+      store.addActivity(`招聘回复需要本人确认：${job.company || "招聘方"} / ${job.title}`);
+      return replyResult("needs-confirmation", message, { reply, job, chat });
+    }
+    if (!reply.draft) throw new Error("模型没有生成可发送的回复内容");
+
+    await sendVerifiedBossReply({ page, tabId, chatState, job, reply: reply.draft, replyTarget });
+    const message = `已按 JD 回复并确认发送：${job.company || "招聘方"} / ${job.title}`;
+    completeAutoReply({ fingerprint: chatState.fingerprint, conversationKey: chatState.conversationKey, status: "sent", message, job, reply: reply.draft });
+    store.addActivity(`${message}（${source === "background" ? "自动检查" : "主动检查"}）`);
+    return replyResult("sent", message, { reply, job, chat });
+  } catch (error) {
+    const message = error.message || "招聘回复处理失败";
+    setAutoReply({ status: "error", message, lastError: message });
+    throw error;
+  } finally {
+    bossReplyLocks.delete(tenantId);
+  }
+}
+
 const SAFE_BOSS_TRANSITION = /^(?:继续沟通|去沟通|进入沟通|打开聊天|留在此页|返回职位|关闭|取消)$/i;
 
 function initializeBossContactAttempt(jobId) {
@@ -1742,6 +2354,7 @@ function bossSessionOperationId(baseOperationId, session) {
     session?.tabId || null,
     session?.url || "",
     session?.conversationId || "",
+    session?.jobUrl || "",
     session?.recruiter || "",
     session?.jobTitle || "",
     session?.company || ""
@@ -1830,6 +2443,9 @@ async function applyCurrentBossJob(runId, tabId, job) {
       lastVerifiedAt: new Date().toISOString()
     });
     recordAutopilotAction({ id: pending.sendOperationId || operationIds.send, kind: "send-greeting", jobId: job.id, status: "verified" });
+    if (recovered.page?.boss?.chat) {
+      rememberAutoReplyBinding(bossConversationKey(recovered.page.boss.chat), job.id);
+    }
     recordBossJobSent(job, { receipt: `${runId}:${job.id}`, evidence: { recovered: true } });
     return restoreBossListAfterContact(runId, recovered.tabId, job);
   }
@@ -2005,6 +2621,9 @@ async function applyCurrentBossJob(runId, tabId, job) {
     lastVerifiedAt: new Date().toISOString()
   });
   recordAutopilotAction({ id: sendOperationId, kind: "send-greeting", jobId: job.id, status: "verified" });
+  if (verified.page?.boss?.chat) {
+    rememberAutoReplyBinding(bossConversationKey(verified.page.boss.chat), job.id);
+  }
   recordBossJobSent(job, {
     receipt: `${runId}:${job.id}`,
     evidence: outboundGreetingEvidence(verified.page, job.greeting)
@@ -2845,7 +3464,7 @@ tenantRuntime.setTenantInitializer(() => {
   }
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.17.1", remoteMode, multiUser: multiUserMode }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "jobdeck", version: "0.17.2", remoteMode, multiUser: multiUserMode }));
 app.get("/api/state", (_req, res) => res.json(statePayload()));
 
 app.post("/api/provider", (req, res) => {
@@ -2941,7 +3560,13 @@ function compactBrowserPage(page) {
       location: page.boss.location || "",
       activeExpectation: page.boss.activeExpectation || null,
       jobs: Array.isArray(page.boss.jobs) ? page.boss.jobs.slice(0, 12).map((job) => ({ title: job.title, company: job.company, salary: job.salary, location: job.location })) : [],
-      chat: page.boss.chat ? { recruiter: page.boss.chat.recruiter, company: page.boss.chat.company, jobTitle: page.boss.chat.jobTitle, messages: page.boss.chat.messages?.slice(-6) } : null
+      chat: page.boss.chat ? {
+        recruiter: page.boss.chat.recruiter,
+        company: page.boss.chat.company,
+        jobTitle: page.boss.chat.jobTitle,
+        jobUrl: page.boss.chat.jobUrl,
+        messages: page.boss.chat.messages?.slice(-6)
+      } : null
     } : null
   };
 }
@@ -3039,18 +3664,16 @@ const agentTools = [
   },
   {
     name: "draft_current_recruiter_reply",
-    description: "读取当前 BOSS 对话并生成事实安全的回复草稿；敏感事项只请求本人确认，不自动发送",
+    description: "读取招聘方最新消息与对应完整 JD，生成针对性事实回复；常规问题用 Computer Use 真实发送并核验，敏感事项暂停等待本人确认",
     input: {},
-    risk: "read",
+    risk: "reply:send",
     execute: async () => {
-      const page = await bridge.execute({ kind: "inspect" });
-      if (page?.adapter !== "boss-zhipin" || page?.pageType !== "chat" || !page.boss?.chat) throw new Error("当前不是可识别的 BOSS 沟通页面");
-      const reply = await ai.draftBossReply(page.boss.chat);
-      let stagedActionId = null;
-      if (!reply.needsConfirmation && reply.draft && page.boss.chat.composer?.selector) {
-        stagedActionId = bridge.stage({ kind: "type", selector: page.boss.chat.composer.selector, value: reply.draft, reason: "Agent 生成事实安全的招聘回复草稿" }).id;
-      }
-      return { progress: true, summary: reply.needsConfirmation ? `回复需要本人确认：${reply.reason}` : "已生成并加入确认队列，尚未发送", data: { reply, stagedActionId } };
+      const result = await processCurrentBossReply({ source: "agent" });
+      return {
+        progress: result.status === "sent" || result.status === "ignored",
+        summary: result.message,
+        data: result
+      };
     }
   },
   {
@@ -3764,26 +4387,26 @@ app.post("/api/browser/plan", async (req, res) => {
   }
 });
 
-app.post("/api/boss/draft-reply", async (_req, res) => {
+app.post("/api/boss/draft-reply", async (req, res) => {
   try {
-    const page = await bridge.execute({ kind: "inspect" });
-    if (page.adapter !== "boss-zhipin" || page.pageType !== "chat" || !page.boss?.chat) {
-      return res.status(400).json({ error: "当前不是可识别的 BOSS 直聘沟通页面" });
-    }
-    const reply = await ai.draftBossReply(page.boss.chat);
-    let item = null;
-    if (!reply.needsConfirmation && reply.draft && page.boss.chat.composer?.selector) {
-      item = bridge.stage({
-        kind: "type",
-        selector: page.boss.chat.composer.selector,
-        value: reply.draft,
-        reason: `为 ${page.boss.chat.recruiter || "当前招聘方"} 填写经事实边界检查的回复草稿`
+    const source = req.body?.source === "extension-poll" ? "background" : "manual";
+    const rawTarget = req.body?.target || (
+      req.body?.tabId !== undefined || req.body?.conversationId !== undefined || req.body?.fingerprint !== undefined
+        ? req.body
+        : null
+    );
+    const target = normalizeBossReplyTarget(rawTarget);
+    if (source === "background" && !target) {
+      return res.status(400).json({
+        status: "error",
+        message: "后台自动回复缺少明确的目标招聘对话",
+        error: "后台自动回复缺少明确的目标招聘对话"
       });
     }
-    store.addActivity(reply.needsConfirmation ? "BOSS 回复需要本人决定" : "已生成 BOSS 安全回复草稿");
-    res.status(202).json({ reply, item, chat: { recruiter: page.boss.chat.recruiter, jobTitle: page.boss.chat.jobTitle, company: page.boss.chat.company } });
+    const result = await processCurrentBossReply({ source, target });
+    res.status(result.status === "sent" ? 200 : 202).json(result);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(400).json({ status: "error", message: error.message, error: error.message });
   }
 });
 

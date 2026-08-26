@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AIService } from "../server/ai.mjs";
-import { jobCompatibilityPrompt, recruiterGreetingPrompt, resumeOptimizationPrompt } from "../server/prompts.mjs";
+import { bossReplyPrompt, jobCompatibilityPrompt, recruiterGreetingPrompt, resumeOptimizationPrompt } from "../server/prompts.mjs";
 import { normalizeRecruiterGreeting, recruiterGreetingIssues } from "../server/greeting.mjs";
 
 test("resume optimization keeps employment, independent projects and open source separate", () => {
@@ -229,4 +229,333 @@ test("cross-industry greetings bridge verified engineering evidence to the JD do
   assert.match(prompt, /这些工程经验可以迁移到法律 AI 产品建设/);
   assert.match(prompt, /从 JD 提取具体业务领域/);
   assert.match(prompt, /不得暗示候选人已有该行业经验/);
+});
+
+test("BOSS reply prompt is driven by the latest recruiter question and the full JD", () => {
+  const prompt = bossReplyPrompt({
+    chat: {
+      recruiter: "蒋女士",
+      jobTitle: "AI 全栈工程师",
+      company: "示例科技",
+      messages: [
+        { from: "candidate", text: "您好，岗位方向与我的实践匹配。" },
+        { from: "recruiter", text: "你有 Telegram Bot 和行情机器人经验吗？" }
+      ]
+    },
+    latestInbound: { from: "recruiter", text: "你有 Telegram Bot 和行情机器人经验吗？" },
+    job: {
+      title: "AI 全栈工程师",
+      company: "示例科技",
+      location: "深圳",
+      salary: "25-40K",
+      description: "负责交易行情机器人、Agent 工具调用和 Go 服务的产品化交付。"
+    }
+  }, {
+    status: "已毕业",
+    facts: [
+      "正式工作以 Web3 与 Go 分布式后端为主",
+      "独立开发 OnPeople Agent 工作台",
+      "参与 Cherry Studio 开源贡献",
+      "具备 Telegram Bot 和交易行情机器人开发经验"
+    ]
+  });
+
+  assert.match(prompt, /你有 Telegram Bot 和行情机器人经验吗/);
+  assert.match(prompt, /交易行情机器人、Agent 工具调用和 Go 服务/);
+  assert.match(prompt, /先直接回答问题/);
+  assert.match(prompt, /OnPeople 必须写成“独立开发/);
+  assert.match(prompt, /Cherry Studio 必须写成“开源贡献/);
+  assert.match(prompt, /只有 routine 可以 needsConfirmation=false/);
+  assert.match(prompt, /"action": "reply" \| "ignore"/);
+});
+
+test("BOSS reply prompt remains compatible with the original chat-only call", () => {
+  const prompt = bossReplyPrompt({
+    recruiter: "招聘方",
+    jobTitle: "Go 工程师",
+    messages: [{ from: "recruiter", text: "主要使用过哪些消息队列？" }]
+  }, { facts: ["正式工作使用 RabbitMQ"] });
+
+  assert.match(prompt, /主要使用过哪些消息队列/);
+  assert.match(prompt, /岗位标题：Go 工程师/);
+  assert.match(prompt, /未获取到完整 JD/);
+});
+
+test("BOSS reply prompt never treats a platform card as the latest recruiter question", () => {
+  const prompt = bossReplyPrompt({
+    recruiter: "招聘方",
+    jobTitle: "AI 工程师",
+    messages: [
+      { from: "recruiter", text: "你做过 Telegram Bot 吗？" },
+      { from: "system", text: "你与该职位竞争者 PK 情况" }
+    ]
+  }, { facts: ["具备 Telegram Bot 开发经验"] });
+
+  assert.match(prompt, /招聘方最新消息（必须直接回应）：\n你做过 Telegram Bot 吗/);
+  assert.match(prompt, /招聘方：你做过 Telegram Bot 吗/);
+  assert.match(prompt, /平台通知：你与该职位竞争者 PK 情况/);
+  assert.doesNotMatch(prompt, /招聘方最新消息（必须直接回应）：\n你与该职位竞争者 PK 情况/);
+});
+
+test("AI reply fallback selects recruiter text rather than a newer system card", async () => {
+  let capturedPrompt = "";
+  const service = new AIService({
+    state: { provider: { mode: "responses", model: "test-model" }, candidate: { facts: [] } },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async (request) => {
+        capturedPrompt = String(request.input || "");
+        return {
+          output_text: JSON.stringify({
+            action: "reply",
+            needsConfirmation: false,
+            category: "routine",
+            reason: "可由已核实事实回答",
+            draft: "有，做过 Telegram Bot。"
+          })
+        };
+      }
+    }
+  });
+
+  await service.draftBossReply({
+    messages: [
+      { from: "recruiter", text: "你做过 Telegram Bot 吗？" },
+      { from: "system", text: "你与该职位竞争者 PK 情况" }
+    ]
+  });
+
+  assert.match(capturedPrompt, /招聘方最新消息（必须直接回应）：\n你做过 Telegram Bot 吗/);
+  assert.doesNotMatch(capturedPrompt, /招聘方最新消息（必须直接回应）：\n你与该职位竞争者 PK 情况/);
+});
+
+test("routine JD-aware BOSS replies are eligible for automatic sending", async () => {
+  const service = new AIService({
+    state: {
+      provider: { mode: "responses", model: "test-model" },
+      candidate: { facts: ["正式工作使用 Go 和 RabbitMQ", "独立开发 OnPeople"] }
+    },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          action: "reply",
+          needsConfirmation: false,
+          category: "routine",
+          reason: "可由已核实技术事实回答",
+          draft: "有，正式工作中使用 Go 和 RabbitMQ 处理异步任务；岗位提到的 Agent 工具链方面，我也在独立开发的 OnPeople 中实现了工具调用与失败恢复。"
+        })
+      })
+    }
+  });
+
+  const result = await service.draftBossReply({
+    chat: { messages: [{ from: "recruiter", text: "你有消息队列和 Agent 工具调用经验吗？" }] },
+    latestInbound: { from: "recruiter", text: "你有消息队列和 Agent 工具调用经验吗？" },
+    job: { title: "Go + AI 后端工程师", description: "负责 RabbitMQ 异步任务与 Agent 工具链" }
+  });
+
+  assert.equal(result.action, "reply");
+  assert.equal(result.category, "routine");
+  assert.equal(result.needsConfirmation, false);
+  assert.equal(result.autoSend, true);
+  assert.match(result.draft, /正式工作中/);
+  assert.match(result.draft, /独立开发的 OnPeople/);
+});
+
+test("sensitive recruiter questions cannot be auto-sent even when the model says routine", async () => {
+  const cases = [
+    ["方便说一下你的期望薪资吗？", "salary"],
+    ["明天下午三点面试可以吗？", "interview-time"],
+    ["请发一下你的手机号。", "privacy"],
+    ["这个 offer 你是否接受？", "offer"],
+    ["能签竞业协议吗？", "contract"],
+    ["最快什么时候可以到岗？", "start-date"],
+    ["是否接受驻场？", "relocation"],
+    ["能接受大小周吗？", "work-hours"],
+    ["试用期可以接受吗？", "probation"]
+  ];
+  const service = new AIService({
+    state: { provider: { mode: "responses", model: "test-model" }, candidate: { facts: [] } },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          action: "reply",
+          needsConfirmation: false,
+          category: "routine",
+          reason: "模型误判为常规问题",
+          draft: "可以。"
+        })
+      })
+    }
+  });
+
+  for (const [question, category] of cases) {
+    const result = await service.draftBossReply({
+      chat: { messages: [{ from: "recruiter", text: question }] },
+      latestInbound: { from: "recruiter", text: question },
+      job: { title: "AI 工程师", description: "负责 AI 应用研发和交付" }
+    });
+    assert.equal(result.category, category, question);
+    assert.equal(result.needsConfirmation, true, question);
+    assert.equal(result.autoSend, false, question);
+    assert.match(result.reason, /需要本人确认/, question);
+  }
+});
+
+test("implicit interview availability cannot be misclassified as routine", async () => {
+  const questions = [
+    "明天下午方便吗？",
+    "明天下午可以吗？",
+    "现在方便电话聊一下吗？",
+    "今晚方便电话沟通吗？",
+    "能接个电话吗？",
+    "什么时候方便视频聊一下？",
+    "Are you available for a phone call tomorrow?"
+  ];
+  const service = new AIService({
+    state: { provider: { mode: "responses", model: "test-model" }, candidate: { facts: [] } },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          action: "reply",
+          needsConfirmation: false,
+          category: "routine",
+          reason: "模型误判为常规问题",
+          draft: "可以。"
+        })
+      })
+    }
+  });
+
+  for (const question of questions) {
+    const result = await service.draftBossReply({
+      chat: { messages: [{ from: "recruiter", text: question }] },
+      latestInbound: { from: "recruiter", text: question }
+    });
+    assert.equal(result.action, "reply", question);
+    assert.equal(result.category, "interview-time", question);
+    assert.equal(result.needsConfirmation, true, question);
+    assert.equal(result.autoSend, false, question);
+  }
+});
+
+test("model ignore cannot bypass deterministic sensitive questions", async () => {
+  const cases = [
+    ["方便说一下你的期望薪资吗？", "salary"],
+    ["明天下午方便吗？", "interview-time"],
+    ["请发一下你的手机号。", "privacy"],
+    ["这个 offer 你是否接受？", "offer"],
+    ["需要签署劳动合同。", "contract"],
+    ["能签竞业协议吗？", "contract"],
+    ["股权方案可以接受吗？", "contract"],
+    ["最快什么时候可以到岗？", "start-date"],
+    ["是否接受驻场？", "relocation"],
+    ["能接受大小周吗？", "work-hours"],
+    ["试用期可以接受吗？", "probation"]
+  ];
+  const service = new AIService({
+    state: { provider: { mode: "responses", model: "test-model" }, candidate: { facts: [] } },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          action: "ignore",
+          needsConfirmation: false,
+          category: "routine",
+          reason: "模型认为无需回复",
+          draft: ""
+        })
+      })
+    }
+  });
+
+  for (const [question, category] of cases) {
+    const result = await service.draftBossReply({
+      chat: { messages: [{ from: "recruiter", text: question }] },
+      latestInbound: { from: "recruiter", text: question }
+    });
+    assert.equal(result.action, "reply", question);
+    assert.equal(result.category, category, question);
+    assert.equal(result.needsConfirmation, true, question);
+    assert.equal(result.autoSend, false, question);
+    assert.match(result.reason, /需要本人确认/, question);
+  }
+});
+
+test("rejection-only messages are ignored even if the model drafts a reply", async () => {
+  const service = new AIService({
+    state: { provider: { mode: "responses", model: "test-model" }, candidate: { facts: [] } },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          action: "reply",
+          needsConfirmation: false,
+          category: "routine",
+          reason: "建议礼貌回复",
+          draft: "感谢您的回复。"
+        })
+      })
+    }
+  });
+
+  const result = await service.draftBossReply({
+    chat: { messages: [{ from: "recruiter", text: "很遗憾，本次岗位暂不合适。" }] },
+    latestInbound: "很遗憾，本次岗位暂不合适。",
+    job: { title: "AI 工程师", description: "负责 AI 应用研发" }
+  });
+
+  assert.equal(result.action, "ignore");
+  assert.equal(result.category, "rejection");
+  assert.equal(result.needsConfirmation, false);
+  assert.equal(result.autoSend, false);
+  assert.equal(result.reason, "检测到明确拒绝通知，无需回复");
+  assert.equal(result.draft, "");
+});
+
+test("explicit rejection remains ignored when it mentions a sensitive topic", async () => {
+  const service = new AIService({
+    state: { provider: { mode: "responses", model: "test-model" }, candidate: { facts: [] } },
+    secrets: { apiKey: "test-key" }
+  });
+  service.client = () => ({
+    responses: {
+      create: async () => ({
+        output_text: JSON.stringify({
+          action: "ignore",
+          needsConfirmation: false,
+          category: "routine",
+          reason: "模型认为无需回复",
+          draft: ""
+        })
+      })
+    }
+  });
+
+  const message = "很遗憾，您的期望薪资与岗位不匹配，无法继续推进。";
+  const result = await service.draftBossReply({
+    chat: { messages: [{ from: "recruiter", text: message }] },
+    latestInbound: { from: "recruiter", text: message }
+  });
+
+  assert.equal(result.action, "ignore");
+  assert.equal(result.category, "rejection");
+  assert.equal(result.needsConfirmation, false);
+  assert.equal(result.autoSend, false);
+  assert.equal(result.draft, "");
 });

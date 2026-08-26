@@ -112,6 +112,19 @@ export function createDefaultState() {
         startedAt: null,
         completedAt: null
       },
+      autoReply: {
+        enabled: true,
+        status: "idle",
+        message: "等待招聘方新消息",
+        pending: null,
+        processed: {},
+        recent: [],
+        conversationBindings: {},
+        lastFingerprint: "",
+        lastSentAt: null,
+        lastError: "",
+        updatedAt: null
+      },
       agent: {
         status: "idle",
         runId: null,

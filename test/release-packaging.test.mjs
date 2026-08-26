@@ -12,7 +12,7 @@ test("release version is aligned across app, extension, lockfile, and download l
   const server = read("../server/index.mjs");
   const filename = `JobDeck-Chrome-Extension-v${packageJson.version}.zip`;
 
-  assert.equal(packageJson.version, "0.17.1");
+  assert.equal(packageJson.version, "0.17.2");
   assert.equal(packageLock.version, packageJson.version);
   assert.equal(packageLock.packages[""].version, packageJson.version);
   assert.equal(manifest.version, packageJson.version);

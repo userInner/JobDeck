@@ -22,7 +22,7 @@ function extractNamedFunction(code, name) {
   throw new Error(`${name} source is incomplete`);
 }
 
-test("automatic BOSS workflow does not directly navigate, open job URLs, or mutate DOM controls", () => {
+test("automatic BOSS workflow keeps page interaction in Computer Use, with one exact-JD hydration exception", () => {
   const start = source.indexOf("async function openBossJobList");
   const end = source.indexOf("async function startAutopilotFromCurrentList", start);
   assert.ok(start >= 0 && end > start, "automatic workflow source range is present");
@@ -30,7 +30,6 @@ test("automatic BOSS workflow does not directly navigate, open job URLs, or muta
 
   for (const forbidden of [
     /kind:\s*["']navigate["']/,
-    /kind:\s*["']openBossJob["']/,
     /kind:\s*["']click["']/,
     /kind:\s*["']type["']/,
     /kind:\s*["']mouseMove["']/
@@ -39,6 +38,16 @@ test("automatic BOSS workflow does not directly navigate, open job URLs, or muta
   }
   assert.match(workflow, /kind:\s*["']computerClick["']/);
   assert.match(workflow, /kind:\s*["']computerType["']/);
+  const hydrationStart = source.indexOf("async function hydrateReplyJobFromChat");
+  const hydrationEnd = source.indexOf("async function sendVerifiedBossReply", hydrationStart);
+  assert.ok(hydrationStart >= 0 && hydrationEnd > hydrationStart, "reply JD hydration helper is present");
+  const replyHydration = source.slice(hydrationStart, hydrationEnd);
+  assert.match(replyHydration, /kind:\s*["']openBossJob["']/,
+    "a chat may open its exact linked job only to hydrate the missing full JD");
+  assert.equal((workflow.match(/kind:\s*["']openBossJob["']/g) || []).length, 1,
+    "the exact-JD hydration helper is the only URL-opening exception in this workflow range");
+  assert.doesNotMatch(workflow.replace(replyHydration, ""), /kind:\s*["']openBossJob["']/,
+    "normal job-search and reply interactions remain Computer Use driven");
   assert.match(workflow, /selectSavedBossExpectation\(runId, tab\.id, page, expectationLabel, \{ force: forceExpectation \}\)/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf("async function selectBossJobCard")), /selectExpectedBossLocation\(runId, tab\.id, page, location\)/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf("async function selectBossJobCard")), /bossSearchInput\(page\)/);

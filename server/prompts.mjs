@@ -318,27 +318,63 @@ export function browserPlanPrompt(instruction, page, candidate) {
 可用控件：${JSON.stringify(controls)}`;
 }
 
-export function bossReplyPrompt(chat, candidate) {
-  const messages = (chat.messages || []).slice(-20).map((message) => `${message.from === "candidate" ? "候选人" : "招聘方"}：${message.text}`).join("\n");
+export function bossReplyPrompt(input, candidate) {
+  // Accept the original `chat` argument as well as the JD-aware payload used by
+  // the automatic reply workflow. Keeping this normalization here lets older
+  // callers remain safe while the browser workflow migrates independently.
+  const payload = input?.chat ? input : { chat: input || {}, job: null, latestInbound: null };
+  const chat = payload.chat || {};
+  const job = payload.job || {};
+  const messageRole = (from) => {
+    if (from === "candidate") return "候选人";
+    if (from === "recruiter") return "招聘方";
+    if (from === "system") return "平台通知";
+    return "来源不明";
+  };
+  const messages = (chat.messages || []).slice(-20).map((message) => `${messageRole(message.from)}：${message.text}`).join("\n");
+  const latestRecruiterMessage = String(
+    payload.latestInbound?.text
+      || payload.latestInbound
+      || [...(chat.messages || [])].reverse().find((message) => message?.from === "recruiter")?.text
+      || ""
+  ).trim();
   return `${chatInstructions(candidate, "reply")}
 
-请判断 BOSS 直聘当前对话中招聘方最新问题能否直接用已核实事实回答，并只输出 JSON：
+你要为 BOSS 直聘当前对话生成一条“完整 JD 驱动”的招聘回复。先判断是否应该回复，再判断是否需要本人确认。只输出 JSON：
 {
+  "action": "reply" | "ignore",
   "needsConfirmation": true | false,
-  "category": "routine" | "salary" | "interview-time" | "privacy" | "offer" | "unknown",
+  "category": "routine" | "salary" | "interview-time" | "privacy" | "offer" | "contract" | "start-date" | "relocation" | "work-hours" | "probation" | "rejection" | "unknown",
   "reason": "判断理由，60字以内",
-  "draft": "安全时给出可直接填入的简洁回复；需要本人决定时只给不作承诺的建议草稿"
+  "draft": "可直接发送或交给本人确认的中文回复；ignore 时必须为空字符串"
 }
 
-硬性边界：
-- 薪资、具体面试时间、隐私信息、Offer、合同、搬迁、工时、试用期、到岗承诺必须 needsConfirmation=true。
-- 项目范围、技术栈、毕业状态、已核实开源贡献和可演示内容可以直接回答。
-- 不得把独立项目或开源贡献写成正式工作经历。
-- 不得根据页面猜测用户未确认的事实。
+回复决策：
+- 以“招聘方最新消息”要求的具体信息为第一优先级。先直接回答问题，再从完整 JD 中只挑 1 到 2 条最相关、已核实的证据补充；不要把首轮招呼语再重复一遍。
+- action=ignore 仅用于明确拒绝、纯平台状态通知、没有招聘方新消息或完全无需回复的客套；此时 draft 必须为空。
+- 其他情况 action=reply。项目范围、技术栈、毕业状态、已核实开源贡献、作品或代码演示等事实型问题属于 routine，且只有 routine 可以 needsConfirmation=false。
+- 薪资或待遇、具体面试日期/时刻、电话/微信/证件/住址等隐私、Offer、合同或协议、竞业或股权、到岗/入职时间承诺、搬迁/驻场、工时/加班、试用期，必须使用对应 category 且 needsConfirmation=true。
+- 需要本人确认时仍可给一条不替候选人作决定、不泄露信息、不作承诺的建议草稿，但系统不得自动发送。
+- 完整 JD 缺失时不得假装做岗位定制；除非只是能由已核实事实直接回答的简单问题，否则 category=unknown 且 needsConfirmation=true。
+
+事实与写作边界：
+- 正式工作以 Web3 与 Go 分布式后端为主；只有候选人材料明确支持的内容才可写成“正式工作”。
+- OnPeople 必须写成“独立开发的 Agent 工作台/独立项目”，不得写成任职公司、团队项目或商业客户项目。
+- Cherry Studio 必须写成“开源贡献”，不得写成正式工作或本人主导的产品；只有候选人档案已经核实的 Star 与贡献者排名才可使用。
+- 不虚构 AI 正式从业年限、生产用户、营收、团队规模、行业经验、薪资、面试时间或到岗安排。
+- 草稿应职业化、自然、简洁，通常 60 到 220 个中文字符；不要使用“老板你好”“非常想加入你们”“期待回复”或表情，不要罗列整份技术栈。
+- 如果候选人缺少 JD 所要求的行业正式经历，应如实说明，并只描述可迁移的工程能力，不能假装等价经验。
+
+招聘方最新消息（必须直接回应）：
+${latestRecruiterMessage || "没有提取到招聘方新消息"}
+
+岗位标题：${job.title || chat.jobTitle || "未知"}
+公司：${job.company || chat.company || "未知"}
+地点/薪资：${job.location || "未知"} / ${job.salary || "未知"}
+完整 JD（岗位定制必须以此为准）：
+${String(job.description || "").slice(0, 15000) || "未获取到完整 JD"}
 
 招聘方：${chat.recruiter || "未知"}
-岗位：${chat.jobTitle || "未知"}
-公司：${chat.company || "未知"}
-最近对话：
+最近对话（仅用于避免重复与理解上下文）：
 ${messages || "没有提取到对话内容"}`;
 }

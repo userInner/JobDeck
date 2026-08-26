@@ -87,6 +87,59 @@ function renderBoss(page) {
         : page.pageType === "resume" ? `已识别 ${page.boss?.resume?.sections?.length || 0} 个简历区块` : "专用解析已启用";
   $("#bossContext").textContent = context;
   $("#draftBossReply").classList.toggle("hidden", page.pageType !== "chat");
+  const autoReply = state?.workflow?.autoReply;
+  if (page.pageType === "chat" && autoReply?.message && !$("#draftBossReply").disabled) {
+    $("#bossNote").textContent = autoReply.message;
+  }
+}
+
+function bossReplyPresentation(result = {}) {
+  const reply = result.reply || {};
+  const status = String(
+    result.status || reply.status || (reply.needsConfirmation ? "needs-confirmation" : "")
+  ).replaceAll("_", "-");
+  const message = String(result.message || reply.message || "").trim();
+  const draft = String(reply.draft || result.draft || "").trim();
+  const reason = String(reply.reason || result.reason || "").trim();
+  const presentations = {
+    sent: {
+      note: message || `已结合完整 JD 定制回复并验证发送${draft ? `：${draft}` : ""}`,
+      toast: "定制回复已发送"
+    },
+    "needs-confirmation": {
+      note: `${reason || message || "这条消息需要你本人决定，未自动发送。"}${draft ? ` 建议回复：${draft}` : ""}`,
+      toast: "需要你确认，未自动发送"
+    },
+    waiting: {
+      note: message || "当前没有待回复的新招聘方消息。",
+      toast: "暂无需要回复的新消息"
+    },
+    ignored: {
+      note: message || "这是一条无需回复的通知，已忽略。",
+      toast: "无需回复，已忽略"
+    },
+    duplicate: {
+      note: message || "这条招聘方消息已经处理过，不会重复发送。",
+      toast: "消息已处理"
+    },
+    "missing-jd": {
+      note: message || "未能把当前会话唯一关联到完整 JD，已安全停止。请先从该岗位详情发起沟通。",
+      toast: "缺少可确认的完整 JD"
+    },
+    busy: {
+      note: message || "求职自动流程正在操作 BOSS 页面，本轮回复稍后重试。",
+      toast: "浏览器正在执行其他任务"
+    },
+    error: {
+      note: message || "自动回复执行失败，请查看工作台记录后重试。",
+      toast: "自动回复失败"
+    }
+  };
+  if (presentations[status]) return presentations[status];
+  return {
+    note: message || draft || "已检查当前招聘对话。",
+    toast: message || "当前招聘对话已检查"
+  };
 }
 
 function renderQueue(queue) {
@@ -196,20 +249,20 @@ $("#discover").addEventListener("click", async () => {
 });
 
 $("#draftBossReply").addEventListener("click", async () => {
-  $("#bossNote").textContent = "正在结合当前对话和候选人事实生成草稿…";
+  const button = $("#draftBossReply");
+  button.disabled = true;
+  $("#bossNote").textContent = "正在读取最新招聘方消息、关联完整 JD 并准备定制回复…";
   try {
     const result = await request("/api/boss/draft-reply", { method: "POST" });
-    if (result.reply.needsConfirmation) {
-      $("#bossNote").textContent = `${result.reply.reason || "该问题需要本人决定"} 建议草稿：${result.reply.draft || "请在 Web 工作台处理"}`;
-      showToast("涉及本人决定，未加入自动填写队列");
-    } else {
-      $("#bossNote").textContent = result.reply.draft;
-      showToast(result.item ? "回复草稿已加入确认队列" : "已生成草稿，但未找到输入框");
-    }
+    const presentation = bossReplyPresentation(result);
+    $("#bossNote").textContent = presentation.note;
+    showToast(presentation.toast);
     await refresh();
   } catch (error) {
     $("#bossNote").textContent = error.message;
     showToast(error.message);
+  } finally {
+    button.disabled = false;
   }
 });
 
