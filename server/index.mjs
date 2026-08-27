@@ -2650,6 +2650,26 @@ function stopAutopilotWith(error, fallbackPhase = "autopilot-blocked", { preserv
   store.addActivity(`托管流程${stopped ? "已停止" : "暂停"}：${error.message}`, stopped ? "done" : "error");
 }
 
+function stopAutomaticJobSearch(message = "已停止自动找工作") {
+  const agentRuntime = tenantRuntime.agentRuntime();
+  const wasRunning = ["planning", "executing", "waiting"].includes(agentRuntime.current()?.status)
+    || String(store.state.workflow.autopilot?.status || "").startsWith("running-");
+  const agent = agentRuntime.stop();
+  const cancelledBrowserWaits = wasRunning ? (bridge.cancelPending?.(message) || 0) : 0;
+  if (wasRunning) {
+    setAutopilot({
+      status: "stopped",
+      stage: "stopped",
+      stopRequested: true,
+      message,
+      completedAt: new Date().toISOString()
+    });
+    setWorkflow({ phase: "shortlist", lastError: "" });
+    store.addActivity(`自动找工作已停止${cancelledBrowserWaits ? `；已取消 ${cancelledBrowserWaits} 个等待中的 Chrome 动作` : ""}`);
+  }
+  return { wasRunning, cancelledBrowserWaits, agent, autopilot: store.state.workflow.autopilot };
+}
+
 async function runAutopilotAnalysis(runId, candidateIds, { autoApply = false, tabId = null } = {}) {
   try {
     if (!tabId) throw new Error("没有可用的 BOSS 职位列表标签页");
@@ -3647,8 +3667,8 @@ const agentTools = [
     risk: "read",
     execute: async () => {
       const running = String(store.state.workflow.autopilot?.status || "").startsWith("running-");
-      if (running) setAutopilot({ stopRequested: true, message: "正在完成当前安全边界并停止…" });
-      return { progress: running, summary: running ? "已请求安全停止自动找工作" : "当前没有运行中的自动找工作任务" };
+      if (running) stopAutomaticJobSearch();
+      return { progress: running, summary: running ? "已停止自动找工作" : "当前没有运行中的自动找工作任务" };
     }
   },
   {
@@ -3887,12 +3907,8 @@ app.post("/api/chat/stream", async (req, res) => {
 });
 
 app.post("/api/agent/stop", (_req, res) => {
-  const agentRuntime = tenantRuntime.agentRuntime();
-  const task = agentRuntime.stop();
-  if (String(store.state.workflow.autopilot?.status || "").startsWith("running-")) {
-    setAutopilot({ stopRequested: true, message: "Agent 已请求在当前安全边界后停止自动找工作…" });
-  }
-  res.json({ agent: task, autopilot: store.state.workflow.autopilot });
+  const result = stopAutomaticJobSearch("Agent 已停止自动找工作");
+  res.json({ agent: result.agent, autopilot: result.autopilot });
 });
 
 app.patch("/api/candidate", (req, res) => {
@@ -4276,15 +4292,8 @@ app.post("/api/workflow/autopilot/apply-selected", (req, res) => {
 });
 
 app.post("/api/workflow/autopilot/stop", (_req, res) => {
-  const agentRuntime = tenantRuntime.agentRuntime();
-  if (!["planning", "executing", "waiting"].includes(agentRuntime.current()?.status)
-    && !String(store.state.workflow.autopilot.status).startsWith("running-")) {
-    return res.json({ workflow: store.state.workflow });
-  }
-  agentRuntime.stop();
-  setAutopilot({ stopRequested: true, message: "正在完成当前安全边界并停止…" });
-  store.addActivity("用户请求停止托管投递");
-  res.status(202).json({ workflow: store.state.workflow });
+  const result = stopAutomaticJobSearch();
+  res.json({ stopped: result.wasRunning, cancelledBrowserWaits: result.cancelledBrowserWaits, workflow: store.state.workflow });
 });
 
 app.get("/api/jobs", (_req, res) => res.json(store.state.jobs));

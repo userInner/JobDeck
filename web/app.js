@@ -702,7 +702,7 @@ async function runWorkflowAction(action, button) {
   }
   if (action === "stop-autopilot") {
     setBusy(button, true, "停止中…");
-    try { await api("/api/workflow/autopilot/stop", { method: "POST", body: "{}" }); await refresh(); toast("已请求停止"); }
+    try { await api("/api/workflow/autopilot/stop", { method: "POST", body: "{}" }); await refresh(); toast("已停止自动找工作"); }
     catch (error) { toast(error.message); }
     finally { setBusy(button, false); }
     return;
@@ -881,7 +881,13 @@ function chatActionMarkup(message, index) {
     const sent = autopilot.sent || 0;
     const progress = target > 0 ? Math.min(100, Math.round((sent / target) * 100)) : 0;
     const running = String(autopilot.status || "").startsWith("running-");
-    const title = running ? "自动找工作运行中" : autopilot.status === "complete" ? "自动找工作已完成" : autopilot.stopRequested ? "正在安全停止" : "自动找工作任务";
+    const title = running
+      ? "自动找工作运行中"
+      : autopilot.status === "complete"
+        ? "自动找工作已完成"
+        : autopilot.status === "stopped"
+          ? "自动找工作已停止"
+          : "自动找工作任务";
     return `<div class="chat-task" data-message-index="${index}">
       <div><strong>${title}</strong><span>目标 ${sent}/${target}</span></div>
       <div class="chat-task-track"><i style="width:${progress}%"></i></div>
@@ -907,7 +913,7 @@ $("#messages").addEventListener("click", async (event) => {
   setBusy(button, true, "停止中…");
   try {
     await api("/api/agent/stop", { method: "POST" });
-    toast("已请求安全停止 Agent");
+    toast("已停止 Agent");
     await refresh();
   } catch (error) { toast(error.message); }
   finally { setBusy(button, false); }

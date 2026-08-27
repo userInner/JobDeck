@@ -19,6 +19,16 @@ async function waitUntil(predicate, timeout = 1000) {
   }
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test("goal agent observes, replans, executes tools and finishes by verified progress", async () => {
   const store = fakeStore();
   const calls = [];
@@ -148,6 +158,75 @@ test("goal agent stops immediately when an atomic tool reports needsAttention", 
   assert.equal(store.state.workflow.agent.noProgressCount, 0);
   assert.match(store.state.workflow.agent.message, /验证码/);
   assert.equal(store.state.workflow.agent.steps.at(-1).tool, "inspect");
+  runtime.close();
+});
+
+test("a stopped agent ignores a tool result that arrives after cancellation", async () => {
+  const store = fakeStore();
+  const toolResult = deferred();
+  const runtime = new GoalAgentRuntime({
+    store,
+    ai: { async planAgentStep() { return { type: "tool", tool: "work", arguments: {}, message: "执行工作" }; } },
+    tools: [{ name: "work", description: "执行工作", input: {}, risk: "read", async execute() { return toolResult.promise; } }],
+    observe: async () => ({}),
+    waitStatus: async () => null
+  });
+
+  runtime.start({ goal: "执行后停止", sourceText: "执行后停止", scopes: [] });
+  await waitUntil(() => store.state.workflow.agent.status === "executing");
+  runtime.stop();
+  toolResult.resolve({ progress: true, summary: "迟到的完成结果" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(store.state.workflow.agent.status, "stopped");
+  assert.equal(store.state.workflow.agent.message, "已按用户要求停止 Agent 任务");
+  assert.equal(store.state.workflow.agent.steps.length, 0);
+  runtime.close();
+});
+
+test("a stopped agent ignores a planner response that arrives after cancellation", async () => {
+  const store = fakeStore();
+  const plan = deferred();
+  let toolExecuted = false;
+  const runtime = new GoalAgentRuntime({
+    store,
+    ai: { async planAgentStep() { return plan.promise; } },
+    tools: [{ name: "work", description: "执行工作", input: {}, risk: "read", async execute() { toolExecuted = true; return { progress: true }; } }],
+    observe: async () => ({}),
+    waitStatus: async () => null
+  });
+
+  runtime.start({ goal: "规划后停止", sourceText: "规划后停止", scopes: [] });
+  await waitUntil(() => store.state.workflow.agent.status === "planning");
+  runtime.stop();
+  plan.resolve({ type: "tool", tool: "work", arguments: {}, message: "迟到的计划" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(store.state.workflow.agent.status, "stopped");
+  assert.equal(toolExecuted, false);
+  runtime.close();
+});
+
+test("a stopped waiting agent ignores a late background completion", async () => {
+  const store = fakeStore();
+  const background = deferred();
+  const runtime = new GoalAgentRuntime({
+    store,
+    ai: { async planAgentStep() { return { type: "tool", tool: "background", arguments: {}, message: "启动后台任务" }; } },
+    tools: [{ name: "background", description: "后台任务", input: {}, risk: "read", async execute() { return { progress: true, waitFor: "job", summary: "后台运行中" }; } }],
+    observe: async () => ({}),
+    waitStatus: async () => background.promise
+  });
+
+  runtime.start({ goal: "等待后停止", sourceText: "等待后停止", scopes: [] });
+  await waitUntil(() => store.state.workflow.agent.status === "waiting");
+  const tick = runtime.tickWaiting();
+  runtime.stop();
+  background.resolve({ done: true, success: true, summary: "迟到的后台完成" });
+  await tick;
+
+  assert.equal(store.state.workflow.agent.status, "stopped");
+  assert.equal(store.state.workflow.agent.steps.filter((step) => step.kind === "background").length, 0);
   runtime.close();
 });
 

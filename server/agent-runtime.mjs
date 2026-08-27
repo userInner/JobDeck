@@ -122,6 +122,11 @@ export class GoalAgentRuntime {
     return this.store.state.workflow.agent || {};
   }
 
+  isActiveRun(runId) {
+    const task = this.current();
+    return task.runId === runId && !task.stopRequested && activeStatus(task.status);
+  }
+
   close() {
     clearInterval(this.timer);
   }
@@ -282,6 +287,7 @@ export class GoalAgentRuntime {
         if (task.runId !== runId || task.stopRequested || !activeStatus(task.status)) return;
         this.update({ status: "planning", currentTool: null, message: "正在观察结果并规划下一步…" });
         const observation = await this.observe(this.current());
+        if (!this.isActiveRun(runId)) return;
         const requiredNextAction = normalizeRequiredNextAction(this.current().requiredNextAction);
         let decision;
         if (requiredNextAction && this.tools.has(requiredNextAction.tool)) {
@@ -296,6 +302,7 @@ export class GoalAgentRuntime {
         } else {
           if (this.current().requiredNextAction) this.update({ requiredNextAction: null });
           decision = await this.ai.planAgentStep({ task: this.current(), observation, tools: this.catalog() });
+          if (!this.isActiveRun(runId)) return;
         }
         if (Array.isArray(decision.plan) && decision.plan.length) this.update({ plan: decision.plan });
 
@@ -303,6 +310,7 @@ export class GoalAgentRuntime {
           const verification = this.verifyFinish
             ? await this.verifyFinish({ task: this.current(), observation, decision })
             : { done: true };
+          if (!this.isActiveRun(runId)) return;
           if (verification?.done === false) {
             const message = verification.message || "目标尚未取得足够的可验证进展，正在继续规划…";
             const progressState = this.progressState({ progress: false, actionKey: "finish", observation });
@@ -356,6 +364,7 @@ export class GoalAgentRuntime {
         try {
           result = await tool.execute(decision.arguments || {}, this.current());
         } catch (error) {
+          if (!this.isActiveRun(runId)) return;
           this.appendStep({ kind: "tool", tool: tool.name, label: tool.description, status: "error", result: error.message });
           const progressState = this.progressState({
             progress: false,
@@ -371,6 +380,8 @@ export class GoalAgentRuntime {
           if (!await this.backoffBeforeRetry(runId, progressState, message)) return;
           continue;
         }
+
+        if (!this.isActiveRun(runId)) return;
 
         this.appendStep({
           kind: "tool",
@@ -417,7 +428,7 @@ export class GoalAgentRuntime {
         continueRun = true;
       }
     } catch (error) {
-      if (this.current().runId === runId) {
+      if (this.isActiveRun(runId)) {
         this.appendStep({ kind: "runtime-error", label: error.message, status: "error" });
         this.update({ status: "needs-attention", currentTool: null, waitFor: null, message: error.message });
       }
@@ -432,16 +443,21 @@ export class GoalAgentRuntime {
   async tickWaiting() {
     const task = this.current();
     if (task.status !== "waiting" || !task.waitFor || task.stopRequested) return;
+    const runId = task.runId;
     try {
       const status = await this.waitStatus(task.waitFor, task);
+      const current = this.current();
+      if (current.runId !== runId || current.status !== "waiting" || current.stopRequested) return;
       if (!status) return;
-      this.update({ message: status.summary || task.message });
+      this.update({ message: status.summary || current.message });
       if (status.done) {
-        this.appendStep({ kind: "background", tool: task.currentTool, label: status.summary || "后台任务结束", status: status.success === false ? "error" : "done" });
-        this.update({ status: "planning", waitFor: null, currentTool: null, noProgressCount: status.progress === false ? (task.noProgressCount || 0) + 1 : 0 });
-        queueMicrotask(() => this.run(task.runId));
+        this.appendStep({ kind: "background", tool: current.currentTool, label: status.summary || "后台任务结束", status: status.success === false ? "error" : "done" });
+        this.update({ status: "planning", waitFor: null, currentTool: null, noProgressCount: status.progress === false ? (current.noProgressCount || 0) + 1 : 0 });
+        queueMicrotask(() => this.run(runId));
       }
     } catch (error) {
+      const current = this.current();
+      if (current.runId !== runId || current.stopRequested || current.status !== "waiting") return;
       this.update({ status: "needs-attention", waitFor: null, currentTool: null, message: error.message });
     }
   }

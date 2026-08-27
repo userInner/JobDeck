@@ -139,6 +139,16 @@ export class BrowserBridge {
     return value;
   }
 
+  cancelPending(reason = "浏览器操作已停止") {
+    const error = new Error(reason);
+    const pending = [...this.pending.entries()];
+    for (const [id, request] of pending) {
+      this.pending.delete(id);
+      request.reject(error);
+    }
+    return pending.length;
+  }
+
   stage(input) {
     const action = normalizeAction(input);
     if (!CONTROLLED.has(action.kind)) throw new Error("该动作不需要加入确认队列");

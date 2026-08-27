@@ -61,6 +61,30 @@ test("automatic job search endpoint starts the goal agent instead of a monolithi
   assert.doesNotMatch(source, /async function runAutomaticJobSearch/);
 });
 
+test("stopping automatic job search immediately closes the running state", () => {
+  const server = fs.readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8");
+  const helperStart = server.indexOf("function stopAutomaticJobSearch");
+  const helperEnd = server.indexOf("async function runAutopilotAnalysis", helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, "stop helper source range is present");
+  const helper = server.slice(helperStart, helperEnd);
+  assert.match(helper, /status: "stopped"/);
+  assert.match(helper, /stage: "stopped"/);
+  assert.match(helper, /stopRequested: true/);
+  assert.match(helper, /cancelPending/);
+  assert.doesNotMatch(helper, /正在完成当前安全边界并停止/);
+
+  const endpointStart = server.indexOf('app.post("/api/workflow/autopilot/stop"');
+  const endpointEnd = server.indexOf('app.get("/api/jobs"', endpointStart);
+  const endpoint = server.slice(endpointStart, endpointEnd);
+  assert.match(endpoint, /stopAutomaticJobSearch\(\)/);
+  assert.match(endpoint, /res\.json/);
+  assert.doesNotMatch(endpoint, /res\.status\(202\)/);
+
+  const web = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  assert.match(web, /autopilot\.status === "stopped"/);
+  assert.match(web, /自动找工作已停止/);
+});
+
 test("a server restart checkpoints an active goal as recoverable instead of discarding it", () => {
   const source = fs.readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8");
   const start = source.indexOf("tenantRuntime.setTenantInitializer");

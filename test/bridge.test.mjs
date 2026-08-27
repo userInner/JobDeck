@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { actionLabel, normalizeAction } from "../server/bridge.mjs";
+import { BrowserBridge, actionLabel, normalizeAction } from "../server/bridge.mjs";
 
 test("browser action normalization clamps and limits inputs", () => {
   const action = normalizeAction({ kind: "scroll", amount: 99_999, direction: "down" });
@@ -70,4 +70,20 @@ test("Computer Use actions preserve coordinates and replacement intent", () => {
   const keypress = normalizeAction({ kind: "computerKeypress", tabId: 9, key: "Escape" });
   assert.equal(keypress.key, "Escape");
   assert.match(actionLabel(keypress), /Computer Use 按键/);
+});
+
+test("pending Chrome waits are rejected immediately when browser work is cancelled", async () => {
+  const bridge = new BrowserBridge({
+    secrets: { extensionToken: "test-token" },
+    addActivity() {}
+  });
+  bridge.extension = { readyState: 1, send() {} };
+
+  const pending = bridge.execute({ kind: "inspect" }, 10_000);
+  await Promise.resolve();
+  assert.equal(bridge.pending.size, 1);
+  assert.equal(bridge.cancelPending("用户停止自动找工作"), 1);
+  await assert.rejects(pending, /用户停止自动找工作/);
+  assert.equal(bridge.pending.size, 0);
+  bridge.wss.close();
 });
