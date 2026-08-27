@@ -1511,7 +1511,16 @@ function autopilotProviderError(error) {
   if (/forbidden|\b403\b/i.test(message)) {
     return new Error(`模型服务不可用：Sub2API 拒绝了当前账号的模型请求（${message}）`);
   }
+  if (Number(error?.status) === 503 || /service temporarily unavailable|no available accounts|暂无可用.*账号|\b503\b/i.test(message)) {
+    return new Error("模型服务不可用：Sub2API 当前没有可调度的 OpenAI 上游账号。JobDeck 尚未操作 BOSS，请稍后重试；若持续出现，请检查 Sub2API 上游账号状态。");
+  }
   return error;
+}
+
+function transientAutopilotProviderError(error) {
+  const message = String(error?.message || error || "");
+  return [429, 500, 502, 503, 504].includes(Number(error?.status))
+    || /temporarily unavailable|no available accounts|overloaded|timeout|ECONN(?:RESET|REFUSED)|fetch failed/i.test(message);
 }
 
 async function verifyAutopilotProvider(runId) {
@@ -1521,10 +1530,23 @@ async function verifyAutopilotProvider(runId) {
     status: "running-analysis",
     message: "正在验证 Sub2API 模型与账号分组，验证成功后开始查找并投递"
   });
-  try {
-    await ai.verifyProvider();
-  } catch (error) {
-    throw autopilotProviderError(error);
+  const attempts = 3;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (!autopilotActive(runId)) throw new Error("托管投递已停止");
+    try {
+      await ai.verifyProvider();
+      return;
+    } catch (error) {
+      if (!transientAutopilotProviderError(error) || attempt === attempts) {
+        throw autopilotProviderError(error);
+      }
+      setAutopilot({
+        stage: "provider-check",
+        status: "running-analysis",
+        message: `Sub2API 模型服务暂时不可用，正在自动重试（${attempt}/${attempts}）`
+      });
+      await sleep(attempt * 1500);
+    }
   }
 }
 

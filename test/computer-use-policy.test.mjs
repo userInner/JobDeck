@@ -396,6 +396,20 @@ test("goal-driven job search remains active until the requested verified-contact
   assert.match(source, /API Key is not assigned to any group/);
 });
 
+test("temporary Sub2API outages are retried before asking for attention", () => {
+  const providerError = extractNamedFunction(source, "autopilotProviderError");
+  const transient = extractNamedFunction(source, "transientAutopilotProviderError");
+  const verify = extractNamedFunction(source, "verifyAutopilotProvider");
+
+  assert.match(transient, /429, 500, 502, 503, 504/);
+  assert.match(transient, /no available accounts/);
+  assert.match(verify, /const attempts = 3/);
+  assert.match(verify, /正在自动重试/);
+  assert.match(verify, /await sleep\(attempt \* 1500\)/);
+  assert.match(providerError, /Sub2API 当前没有可调度的 OpenAI 上游账号/);
+  assert.match(providerError, /JobDeck 尚未操作 BOSS/);
+});
+
 test("atomic contact action exposes observable Computer Use click progress", () => {
   const start = source.indexOf("async function applyCurrentBossJob");
   const end = source.indexOf("function unverifiedBossApplicationError", start);
