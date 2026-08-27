@@ -3000,7 +3000,13 @@ async function prepareJobSearchGoal(arguments_ = {}, task = {}) {
       return continueGoal("候选人真实技术证据已就绪；继续读取 BOSS 已保存的求职期望", "prepare_job_search_goal");
     }
     if (!Array.isArray(context.plans) || !context.plans.length) {
-      const initialTab = await bridge.execute({ kind: "openBossJobs" });
+      const existingTabs = Number.isInteger(context.tabId)
+        ? await bridge.execute({ kind: "listTabs" }).catch(() => [])
+        : [];
+      const existingTab = existingTabs.find((tab) => tab.id === context.tabId
+        && /^https:\/\/(?:www\.)?zhipin\.com\/web\/geek\/jobs(?:[/?#]|$)/i.test(String(tab.url || "")));
+      const initialTab = existingTab || await bridge.execute({ kind: "openBossJobs" });
+      await bridge.execute({ kind: "activateTab", tabId: initialTab.id });
       let page = await waitForBossList(runId, initialTab.id, "BOSS 职位列表", 20);
       page = await exposeBossListHeader(runId, initialTab.id, page);
       const plans = buildBossExpectationPlans(page?.boss?.expectationOptions || []);
@@ -4218,6 +4224,16 @@ app.post("/api/workflow/autopilot/run", async (req, res) => {
     const targetApplications = automaticApplicationTarget(req.body?.targetApplications);
     goalResult = resumeOrInitializeAutomaticJobSearchGoal(targetApplications);
     const effectiveTarget = goalResult.targetApplications;
+    if (!goalResult.resumed) {
+      const bossTab = await bridge.execute({ kind: "openBossJobs" });
+      patchAutopilotGoalContext({
+        tabId: bossTab.id,
+        lastAction: "boss-jobs-opened",
+        lastVerifiedAt: new Date().toISOString()
+      });
+      setAutopilot({ message: `已自动打开 BOSS 职位页；正在准备 ${effectiveTarget} 个已验证沟通目标` });
+      store.addActivity("目标驱动求职 Agent：已自动打开并绑定 BOSS 职位页");
+    }
     const goal = `${goalResult.resumed ? "安全恢复服务中断前的同一求职目标；先核验任何未决外部发送，再" : ""}使用真实 Chrome 和 BOSS 已保存求职期望，持续寻找技术方向匹配的岗位，逐个读取完整 JD、生成定制招呼并完成至少 ${effectiveTarget} 个已验证沟通；每个动作后重新观察并规划，未达到数量不得结束`;
     const task = agentRuntime.start({ goal, sourceText: goal, scopes: ["jobs:apply"] });
     if (goalResult.resumed) {
@@ -4237,6 +4253,14 @@ app.post("/api/workflow/autopilot/run", async (req, res) => {
           message: hasExternalCheckpoint
             ? "先核验服务中断前的外部沟通检查点；只有验证成功才计数，结果不明确时绝不新建发送"
             : "从原目标最近一次已验证进度继续"
+        }
+      });
+    } else {
+      agentRuntime.update({
+        requiredNextAction: {
+          tool: "prepare_job_search_goal",
+          arguments: { targetApplications: effectiveTarget },
+          message: "BOSS 职位页已经打开；先验证模型与候选人事实，再读取 BOSS 已保存的求职期望"
         }
       });
     }

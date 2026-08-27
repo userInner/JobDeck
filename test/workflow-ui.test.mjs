@@ -61,6 +61,26 @@ test("automatic job search endpoint starts the goal agent instead of a monolithi
   assert.doesNotMatch(source, /async function runAutomaticJobSearch/);
 });
 
+test("a fresh automatic job search opens and binds BOSS before the goal agent plans", () => {
+  const source = fs.readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8");
+  const start = source.indexOf('app.post("/api/workflow/autopilot/run"');
+  const end = source.indexOf('app.post("/api/workflow/autopilot/apply-selected"', start);
+  assert.ok(start >= 0 && end > start, "automatic job search endpoint source range is present");
+  const endpoint = source.slice(start, end);
+  const openIndex = endpoint.indexOf('bridge.execute({ kind: "openBossJobs" })');
+  const startIndex = endpoint.indexOf("agentRuntime.start");
+  assert.ok(openIndex >= 0 && startIndex > openIndex, "BOSS opens before the agent starts planning");
+  assert.match(endpoint, /patchAutopilotGoalContext\(\{[\s\S]*tabId: bossTab\.id/);
+  assert.match(endpoint, /tool: "prepare_job_search_goal"/);
+  assert.match(endpoint, /arguments: \{ targetApplications: effectiveTarget \}/);
+
+  const prepareStart = source.indexOf("async function prepareJobSearchGoal");
+  const prepareEnd = source.indexOf("async function inspectNextJobForGoal", prepareStart);
+  const prepare = source.slice(prepareStart, prepareEnd);
+  assert.match(prepare, /existingTabs\.find/);
+  assert.match(prepare, /kind: "activateTab", tabId: initialTab\.id/);
+});
+
 test("stopping automatic job search immediately closes the running state", () => {
   const server = fs.readFileSync(new URL("../server/index.mjs", import.meta.url), "utf8");
   const helperStart = server.indexOf("function stopAutomaticJobSearch");
